@@ -1,12 +1,19 @@
-# 1.9.2 · 首次公开测试版
+# 1.9.3 · 双代游戏图标更新
 
 面向 Windows 10/11 x64、Steam 版杀戮尖塔 I / II。
 
 ## 下载与运行
 
-普通用户下载 `spire-mod-manager-1.9.2-windows-x64.zip`，完整解压到可写目录，运行“尖塔模组管理器.exe”。无需安装 Python，无需安装包。不要只从 ZIP 拖出 EXE；旁边的 _internal 必须保留。系统需要 Microsoft Edge WebView2 Runtime 与 .NET Framework 4.8；Windows 10/11 通常已有，缺少时按 README 的官方链接安装。
+普通用户下载 `spire-mod-manager-1.9.3-windows-x64.zip`，完整解压到可写目录，运行“尖塔模组管理器.exe”。无需安装 Python，无需安装包。不要只从 ZIP 拖出 EXE；旁边的 _internal 必须保留。系统需要 Microsoft Edge WebView2 Runtime 与 .NET Framework 4.8；Windows 10/11 通常已有，缺少时按 README 的官方链接安装。
 
 源码使用者阅读 DEVELOPMENT.md；GitHub 自动生成的 Source code ZIP 不是 Windows 程序包。
+
+## 本次更新
+
+- 应用图标改为两代游戏卡牌图案前后叠放，并分别标注 I / II。
+- EXE、窗口与任务栏图标、界面左上角标识统一使用新图案。
+- 提供多个 Windows 图标尺寸，保留透明背景。
+- 模组管理与备份功能保持原有行为；升级时完整覆盖程序文件，保留自己的 data 目录。建议先关闭旧版再替换。
 
 ## 功能
 

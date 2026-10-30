@@ -80,6 +80,8 @@ def first_run_check(window, api, output):
     report = {'ok': False, 'checks': []}
     try:
         wait_js(window, "Boolean(window.spire?.state)")
+        wait_js(window, "document.querySelector('.brand img')?.complete&&document.querySelector('.brand img').naturalWidth===128")
+        report['checks'].append('numbered dual-game sidebar icon decoded')
         wait_js(window, "document.getElementById('dialog').open&&document.getElementById('dialogTitle').textContent.includes('Steam API')")
         assert not api._model.mods and not api._model.store.get('backup_cache_enabled', False)
         assert not (api._model.directory / 'credentials').exists()

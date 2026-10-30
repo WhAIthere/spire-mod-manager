@@ -1,14 +1,16 @@
 """WebView2 desktop entry point. HTML paints; Python owns the existing local mod logic."""
 import json
+import base64
 import os
 from pathlib import Path
 import sys
 import threading
 import traceback
 
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 ASSETS = Path(getattr(sys, "_MEIPASS", ROOT)) / "frontend"
+ICON_DIR = Path(getattr(sys, '_MEIPASS', ROOT)) / 'assets'
 DATA = Path(os.environ.get("SPIRE_MANAGER_DATA", ROOT / "data"))
 if not getattr(sys, "frozen", False) and "SPIRE_MANAGER_DATA" not in os.environ:
     current = ROOT / "dist/尖塔模组管理器/data"
@@ -20,7 +22,8 @@ def page():
     html = (ASSETS / "index.html").read_text(encoding="utf-8")
     css = (ASSETS / "styles.css").read_text(encoding="utf-8")
     js = (ASSETS / "app.js").read_text(encoding="utf-8")
-    return html.replace('<link rel="stylesheet" href="styles.css">', "<style>" + css + "</style>").replace(
+    icon_data = 'data:image/png;base64,' + base64.b64encode((ICON_DIR / 'app-icon-small.png').read_bytes()).decode('ascii')
+    return html.replace('__APP_ICON_DATA__', icon_data).replace('<link rel="stylesheet" href="styles.css">', "<style>" + css + "</style>").replace(
         '<script src="app.js"></script>', "<script>" + js + "</script>")
 
 
@@ -53,10 +56,10 @@ def launch(model=None, check_output=None, quick=False, first_run=False):
     if check_output:
         from web_smoke import check, quick_check, first_run_check
         check = first_run_check if first_run else quick_check if quick else check
-        webview.start(check, (window, api, check_output), gui="edgechromium", private_mode=True,
+        webview.start(check, (window, api, check_output), gui="edgechromium", private_mode=True, icon=str(ICON_DIR / 'app-icon.ico'),
                       storage_path=str(model.directory / "webview-check"))
     else:
-        webview.start(gui="edgechromium", private_mode=False, storage_path=str(model.directory / "webview"))
+        webview.start(gui="edgechromium", private_mode=False, icon=str(ICON_DIR / 'app-icon.ico'), storage_path=str(model.directory / "webview"))
 
 
 def main():

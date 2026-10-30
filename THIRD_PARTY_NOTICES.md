@@ -2,6 +2,8 @@
 
 项目自身代码使用 MIT 许可证，版权署名见 LICENSE；第三方组件保留原有许可，不因本项目的 MIT 许可而改变。
 
+应用图标基于 Slay the Spire / Slay the Spire 2 的游戏图标组合并添加 I / II 标记，图案权利属于 Mega Crit 及相关权利人，不属于项目代码 MIT 许可的再授权范围。来源与制作说明见 assets/ICON.md。
+
 Windows 下载版使用 Python、pywebview、pythonnet、Pillow、clr-loader、CFFI 等组件，以及 Microsoft WebView2 SDK 组件。具体构建版本和附带许可文本在下载包 licenses 目录。PyInstaller 用于构建，适用其许可证及引导程序分发例外。
 
 本软件包含 Microsoft 提供的组件。Microsoft WebView2 运行时可能收集软件使用信息并发送给 Microsoft；相关设置、许可及隐私说明见微软官方网站：https://developer.microsoft.com/microsoft-edge/webview2/ 和 https://privacy.microsoft.com/privacystatement 。系统 WebView2 Runtime 和 .NET Framework 不随本下载包安装。

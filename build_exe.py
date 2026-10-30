@@ -29,6 +29,8 @@ def main():
     subprocess.run([str(python), "-m", "PyInstaller", "--noconfirm", "--windowed", "--onedir",
                     "--name", NAME, "--distpath", str(target), "--workpath", str(ROOT / "build/cache"),
                     "--specpath", str(ROOT / "build"),
+                    "--icon", str(ROOT / 'assets/app-icon.ico'),
+                    "--add-data", str(ROOT / 'assets') + ';assets',
                     "--add-data", str(ROOT / "frontend") + ";frontend",
                     "--exclude-module", "tkinter", "--exclude-module", "_tkinter",
                     "--exclude-module", "PyQt5", "--exclude-module", "PyQt6",

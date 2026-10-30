@@ -20,7 +20,8 @@ SOURCE_FILES = [name + '.py' for name in MODULES + TESTS] + [
     'build_exe.py', 'public_release.py', 'README.md', 'DEVELOPMENT.md', 'LICENSE',
     'THIRD_PARTY_NOTICES.md', 'requirements.txt', 'requirements-build.txt', '.gitignore',
     'docs/RELEASE_NOTES.md', 'licenses/WebView2.LICENSE.txt', 'licenses/proxy-tools.LICENSE.txt',
-    'frontend/index.html', 'frontend/styles.css', 'frontend/app.js']
+    'frontend/index.html', 'frontend/styles.css', 'frontend/app.js',
+    'assets/app-icon.png', 'assets/app-icon-small.png', 'assets/app-icon.ico', 'assets/ICON.md']
 
 
 def version():
