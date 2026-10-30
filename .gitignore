@@ -1,0 +1,24 @@
+__pycache__/
+data/
+exports/
+*.pyc
+
+# Local runtimes and generated bundles can contain personal data.
+.venv/
+.build-venv/
+.devtools/
+build/
+dist/
+dev-data/
+.pytest_cache/
+*.spec
+*.log
+.env
+.env.*
+!.env.example
+credentials/
+webview/
+webview-check/
+
+# Local UI captures are not documentation assets.
+ui-preview.png

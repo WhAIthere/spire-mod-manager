@@ -1,0 +1,4 @@
+# Python 3.11+ (Windows x64); UI and cover decoding
+pywebview==6.2.1
+pythonnet==3.2.1; sys_platform == "win32"
+Pillow==13.0.0

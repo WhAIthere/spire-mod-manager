@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+<title>尖塔 · 模组库</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">S</span><div><strong>尖塔 · 模组库</strong><span>YOUR MOD COLLECTION</span></div></div>
+    <div class="side-section"><div class="section-label">开关方案 <span class="tiny">PROFILES</span></div>
+      <select id="profile" aria-label="开关方案"><option value="">暂无方案</option></select>
+      <div class="two-buttons"><button id="saveProfile" title="将当前开关保存为方案" data-icon="save">保存</button><button id="restoreProfile" title="载入方案中的模组开关状态" data-icon="restore">载入</button></div><button id="deleteProfile" class="profile-delete" data-icon="trash">删除当前方案</button>
+    </div>
+    <div class="side-divider"></div>
+    <div class="side-section tools"><div class="section-label">整理与检查 <span id="selectedCount" class="count-badge">0 项</span></div>
+      <button id="setGroup" data-icon="folder">设置分组</button>
+      <button id="manageTags" data-icon="tag">管理标签</button>
+      <button id="dependencies" data-icon="layers">补齐本地依赖</button>
+      <button id="details" data-icon="info">详细信息</button>
+      <button id="workshop" data-icon="link">打开创意工坊</button>
+    </div>
+    <div class="side-bottom"><label for="theme" class="section-label">外观</label><div class="theme-control"><span id="themeIcon"></span><select id="theme" aria-label="界面主题"><option value="system">跟随系统</option><option value="light">日间模式</option><option value="dark">夜间模式</option></select></div><div class="version">版本 <span>1.9.2</span></div></div>
+  </aside>
+  <main>
+    <header class="topbar"><div class="library-heading"><div class="game-tabs" role="tablist" aria-label="选择游戏"><button data-game="sts1" class="active" role="tab">尖塔 <b>I</b></button><button data-game="sts2" role="tab">尖塔 <b>II</b></button></div><span class="library-total"><span id="totalBadge">—</span> 个模组</span><span id="libraryCaption" class="sr-only">本地模组</span></div>
+      <div class="header-actions"><button id="scan" data-icon="refresh" title="刷新模组列表，检查新增、更新和移除，再更新标题和封面；不主动删除模组文件。">更新模组列表</button><button id="progress" data-icon="activity">日志</button><div class="popover-anchor"><button id="more" class="icon-button" aria-label="更多操作与设置" title="更多操作与设置" data-icon="more"></button><div id="moreMenu" class="popover menu" hidden>
+        <div class="menu-label">更新与备份</div><button id="smallRefresh" data-icon="refresh" title="刷新现有模组的标题和封面；不重扫列表，不改开关，不生成缓存。">仅更新标题与封面</button><button id="releasePacks" data-icon="archive">备份包：导入 / 导出</button><button id="export" data-icon="download">导出模组清单（JSON）</button><hr><div class="menu-label">设置</div><button id="settings" data-icon="settings">路径与高级设置</button><button id="apiSettings" data-icon="key">Steam API 管理</button><button id="cacheSettings" data-icon="archive">更新与备份设置</button><hr><div class="menu-label">编辑</div><button id="undo" data-icon="undo">撤销 <kbd>Ctrl Z</kbd></button><button id="redo" data-icon="redo">重做 <kbd>Ctrl Shift Z</kbd></button>
+      </div></div></div>
+    </header>
+    <section class="workspace">
+      <div class="toolbar"><label class="search-box"><span data-icon="search"></span><input id="search" type="search" placeholder="搜索名称、昵称、标签…" aria-label="搜索模组" autocomplete="off" spellcheck="false"><kbd>/</kbd></label><select id="viewMode" aria-label="分组方式" title="选择分组方式"><option>不分组</option><option>文件夹分组</option><option>自定义分组</option><option>标签分组</option></select><select id="groupFilter" aria-label="筛选自定义组"><option>全部分组</option></select><div class="layout-switch" role="group" aria-label="视图切换"><button id="layoutTable" data-layout="table" data-icon="table" aria-pressed="true" title="详细表格：查看模组各项属性">表格</button><button id="layoutCovers" data-layout="covers" data-icon="image" aria-pressed="false" title="封面列表：用封面、昵称和版本浏览模组">封面</button></div><div class="popover-anchor"><button id="display" class="icon-button" data-icon="sliders" aria-label="列表显示与批量操作" title="列表显示与批量操作"></button><div id="displayMenu" class="popover display-menu" hidden><div class="menu-label">列表显示</div><label><input id="hideOld" type="checkbox">隐藏已被替代的旧副本</label><label><input id="showFolder" type="checkbox">显示文件夹归属</label><button id="groupOrder" title="按分组名称排序，点击切换正序/倒序" hidden>组名 ↑</button><hr><div class="menu-label">批量开关 · 当前筛选结果</div><div class="two-buttons"><button id="filterOn">全部开启</button><button id="filterOff">全部关闭</button></div></div></div></div>
+      <div class="batchbar"><div id="groupFolds" class="group-fold-controls" role="group" aria-label="全部分组折叠与展开" hidden><button id="collapseAll" title="折叠当前分组模式下的全部分组">全部折叠</button><button id="expandAll" title="展开当前分组模式下的全部分组">全部展开</button></div><div class="tag-input" hidden><span data-icon="tag"></span><input id="quickTag" placeholder="快捷添加标签" autocomplete="off"><button id="addTag">添加标签</button></div><span id="shownCaption">—</span></div>
+      <div class="list-shell"><section class="table-card" aria-label="模组列表"><div id="tableHeader" class="table-header"><div id="headerInner" class="grid-row header-inner"></div></div><div id="viewport" class="viewport" tabindex="0" role="grid" aria-label="模组，支持多选和快捷键"><div id="spacer" class="spacer"><div id="rows" class="rows"></div></div><div id="empty" class="empty-state" hidden><span data-icon="layers"></span><strong>没有匹配的模组</strong><p>试试调整筛选条件，或重新扫描</p></div></div></section><div id="scrollRail" class="scroll-rail" aria-label="模组列表滚动条"><div id="scrollRailSpace"></div></div></div>
+      <div class="table-hint"><span>Ctrl / Shift 多选 · Ctrl A 选择当前组 · 双击昵称编辑</span><span>修改后需预览并应用</span></div>
+    </section>
+    <footer><div class="footer-status"><span id="statusDot" class="status-dot"></span><span id="status">正在读取模组…</span></div><label class="master-label"><input id="master" type="checkbox">模组总开关</label><button id="apply" class="primary" data-icon="check">预览并应用 <span id="changeBadge" class="change-badge" hidden></span></button></footer>
+  </main>
+</div>
+<div id="busyLine" class="busy-line" hidden></div><div id="toast" class="toast" hidden role="status"></div>
+<dialog id="dialog"><div class="dialog-heading"><h2 id="dialogTitle"></h2><button id="dialogX" class="icon-button" data-icon="x" aria-label="关闭"></button></div><div id="dialogBody" class="dialog-body"></div><div id="dialogButtons" class="dialog-buttons"></div></dialog>
+<script src="app.js"></script>
+</body></html>
