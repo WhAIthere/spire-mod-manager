@@ -12,10 +12,10 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 MODULES = '''web_app web_api web_jobs web_smoke manager_model core backup covers history
 release_store steam_account steam_bridge steam_workshop task_log versions view window_layout
-workshop_queue'''.split()
+workshop_queue mod_lists'''.split()
 TESTS = '''test_backup test_core test_covers test_release_store test_runtime test_scan_cache
 test_steam_account test_steam_workshop test_task_log test_versions test_web_manager
-test_window_layout test_workshop_queue test_public_release'''.split()
+test_window_layout test_workshop_queue test_public_release test_mod_lists'''.split()
 SOURCE_FILES = [name + '.py' for name in MODULES + TESTS] + [
     'build_exe.py', 'public_release.py', 'README.md', 'DEVELOPMENT.md', 'LICENSE',
     'THIRD_PARTY_NOTICES.md', 'requirements.txt', 'requirements-build.txt', '.gitignore',

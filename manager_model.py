@@ -1,6 +1,8 @@
 """UI-independent editor state for the WebView2 interface. Game adapters stay in core.py."""
 import copy
 from pathlib import Path
+from datetime import datetime
+import mod_lists
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +20,7 @@ from versions import VersionStore
 
 class Manager:
     _CONTEXT_FIELDS = ("mods", "issues", "session", "master", "baseline", "history", "status", "warning",
-                       "workshop_snapshot", "query", "group", "view", "config_path", "game_dir")
+                       "workshop_snapshot", "query", "group", "view", "config_path", "game_dir", "list_records", "scan_state")
 
     def __init__(self, directory, catalog=None, steam=bridge):
         self.directory = Path(directory)
@@ -46,6 +48,8 @@ class Manager:
         self.query, self.group = "", "全部分组"
         self.view = {}
         self.config_path, self.game_dir = "", ""
+        self.list_records = {}
+        self.scan_state = {"phase":"not_scanned", "checked_at":""}
         self._configure_game()
         self.history.reset(self.editor_state())
 
@@ -62,6 +66,7 @@ class Manager:
 
     def _configure_game(self):
         saved, catalog = self.state, self.catalog[self.game_id]
+        self.list_records = copy.deepcopy(saved.get("shared_list", {}))
         self.game_dir = saved.get("game_dir") or catalog["game_dir"]
         choices = list(catalog["configs"])
         old = saved.get("config_path", "")
@@ -96,6 +101,9 @@ class Manager:
         self.game_id = game
         for key, value in context.items():
             setattr(self, key, value)
+        self.state["shared_list"] = self.list_records
+        self.state["profiles"] = context.get("resolved_profiles", self.state.get("profiles",{}))
+        self.save()
         self.changed()
 
     def preload(self):
@@ -129,15 +137,19 @@ class Manager:
             view["mode"] = "不分组"
         if view["sort_column"] in ("file", "id", "copies"):
             view["sort_column"] = "nickname"
-        context = dict(mods=[], session=None, issues=[], master=True, baseline={}, history=History(),
+        scan_state={"phase":"failed","checked_at":datetime.now().isoformat(timespec="seconds")}
+        context = dict(scan_state=scan_state,list_records=copy.deepcopy(saved.get("shared_list",{})),mods=[], session=None, issues=[], master=True, baseline={}, history=History(),
                        status="正在读取本地模组…", warning="", workshop_snapshot=None, query="", group="全部分组",
                        view=view, config_path=config_path, game_dir=game_dir)
         try:
-            if not config_path:
-                raise ValueError("未发现游戏配置，请在右上角省略号 →“路径与高级设置”选择配置文件；首次使用请先运行游戏及模组加载器以生成配置。")
-            session = ConfigSession(game, config_path)
             roots = saved.get("workshop_roots", catalog["workshop_roots"])
             mods, issues = scan(game, game_dir, roots, saved.get("titles", {}), self._scan_cache.setdefault(game, {}))
+            scan_state['phase']='attention' if issues else 'complete'
+            context.update(mods=mods,issues=issues)
+            if not config_path:
+                if not game_dir and not roots: scan_state['phase']='not_configured'
+                raise ValueError("未发现游戏配置，请在右上角省略号 →“路径与高级设置”选择配置文件；首次使用请先运行游戏及模组加载器以生成配置。")
+            session = ConfigSession(game, config_path)
             session.load_states(mods)
             if game == "sts2" and any(m.source == "steam_workshop" for m in mods):
                 try:
@@ -154,19 +166,27 @@ class Manager:
                            status="扫描完成" if not issues else "扫描完成，有提示待核对")
         except (OSError, ValueError, TypeError, KeyError) as exc:
             context.update(issues=[str(exc)], status="无法扫描：" + str(exc))
+        for mod in context['mods']:
+            data=saved.get('metadata',{}).get(mod.key,{})
+            mod.group=data.get('group',mod.group);mod.tags=list(data.get('tags',mod.tags));mod.alias=data.get('alias',mod.alias)
         context["baseline"] = {m.key: m.enabled for m in context["mods"]}
+        context['mods'],context['list_records'],context['resolved_profiles']=mod_lists.attach(game,context['mods'],context['list_records'],saved.get('profiles',{}))
+        saved['profiles']=context['resolved_profiles'];saved['shared_list']=context['list_records']
         context["history"].reset(self._editor_snapshot(context["mods"], context["master"], saved))
         return context
 
     def rescan(self, discard=False):
         self.require_discard(discard)
         saved = copy.deepcopy(self.state)
-        saved.update(game_dir=self.game_dir, config_path=self.config_path)
+        saved.update(game_dir=self.game_dir, config_path=self.config_path,shared_list=copy.deepcopy(self.list_records))
         for key, value in self._read_context(self.game_id, saved).items():
             setattr(self, key, value)
         if self.session is not None:
             self.state.update(game_dir=self.game_dir, config_path=self.config_path)
             self.save()
+        self.state["shared_list"] = self.list_records
+        self.state["profiles"] = self.resolved_profiles
+        self.save()
         self.changed()
 
     def editor_state(self):
@@ -177,9 +197,16 @@ class Manager:
         return {"mods": {m.key: {"enabled": m.enabled, "group": m.group, "tags": list(m.tags),
                                 "alias": m.alias, "package_title": m.package_title} for m in mods},
                 "master": master, "profiles": copy.deepcopy(saved.get("profiles", {})),
-                "titles": copy.deepcopy(saved.get("titles", {}))}
+                "titles": copy.deepcopy(saved.get("titles", {})),"shared_list":copy.deepcopy(saved.get("shared_list",{}))}
 
     def persist_metadata(self, record=True):
+        for mod in self.mods:
+            mod.tags=[t for t in mod.tags if t!=mod_lists.MISSING]+([mod_lists.MISSING] if mod.missing else [])
+            if mod.missing: mod.enabled=False
+            ident=mod_lists.identity(mod_lists.record(mod))
+            if ident in self.list_records:
+                self.list_records[ident].update(mod_lists.record(mod))
+        self.state['shared_list']=copy.deepcopy(self.list_records)
         if record:
             self.history.record(self.editor_state())
         for mod in self.mods:
@@ -190,6 +217,8 @@ class Manager:
     def restore_edit(self, state):
         if state is None:
             return
+        self.list_records=copy.deepcopy(state.get('shared_list',{}))
+        self.mods,self.list_records,_=mod_lists.attach(self.game_id,[m for m in self.mods if not m.missing],self.list_records,{},False)
         transitions = {}
         for mod in self.mods:
             if mod.group and mod.key in state['mods']:
@@ -217,7 +246,7 @@ class Manager:
         return mods
 
     def toggle(self, keys, value=None):
-        mods = self.targets(keys)
+        mods = [m for m in self.targets(keys) if not m.missing]
         available = [m for m in mods if m.loadable] or mods
         value = not all(m.enabled for m in available) if value is None else bool(value)
         if value and len(mods) == 1 and mods[0].game == "sts2":
@@ -282,6 +311,8 @@ class Manager:
                 "counts": {"disk_bytes": sum({m.package_key:m.package_bytes or 0 for m in self.mods}.values()), "total": len(self.mods), "shown": len(visible), "enabled": sum(m.enabled for m in self.mods),
                            "changed": sum(m.enabled != self.baseline.get(m.key, False) for m in self.mods),
                            "hidden": sum(m.superseded and not m.enabled for m in self.mods) if self.view["hide_unavailable"] else 0},
+                "scan_state": dict(self.scan_state),
+                "inventory": {"local":sum(not m.missing for m in self.mods),"available":sum(not m.missing and m.loadable for m in self.mods),"missing":sum(m.missing for m in self.mods)},
                 "status": self.status, "warning": self.warning, "configs": configs, "config_path": self.config_path,
                 "game_dir": self.game_dir, "workshop_roots": self.state.get("workshop_roots", self.catalog[self.game_id]["workshop_roots"]),
                 "cover_ids": self.covers.available(self.game_id),
@@ -330,7 +361,7 @@ class Manager:
                 raise ValueError("请输入快照名称。")
             if name in self.state.setdefault("profiles", {}) and not payload.get("overwrite"):
                 raise ValueError("同名快照已存在。")
-            self.state["profiles"][name] = {"enabled": [m.key for m in self.mods if m.enabled], "master": self.master}
+            self.state["profiles"][name] = {"enabled": [m.key for m in self.mods if m.enabled or (m.missing and m.wanted_enabled)], "master": self.master}
         elif action == "profile_restore":
             profile = self.state.get("profiles", {}).get(payload["name"])
             if not profile:
@@ -341,6 +372,8 @@ class Manager:
             self.state.get("profiles", {}).pop(payload["name"], None)
         else:
             mods = self.targets(keys)
+            if action.startswith('tags_') and (mod_lists.MISSING in payload.get('tags',[]) or payload.get('old')==mod_lists.MISSING or mod_lists.MISSING in [t.strip() for t in str(payload.get('value','')).replace('，',',').split(',')]):
+                raise ValueError('“缺失”是系统状态标签，扫描到文件后会自动移除，不能手动修改。')
             if action == "alias":
                 for mod in mods:
                     mod.alias = str(payload["value"]).strip()
@@ -376,25 +409,26 @@ class Manager:
                 "copies": [dict(m.record(), folder_label=m.folder_label) for m in self.mods if m.id == mod.id]}
 
     def prepare_apply(self):
+        local_mods=[m for m in self.mods if not m.missing]
         if self.session is None:
             raise ValueError("请先成功扫描游戏配置。")
         if self.issues:
             raise ValueError("扫描存在异常，请先查看扫描提示：\n" + "\n".join(self.issues))
-        problems = dependency_issues(self.mods)
+        problems = dependency_issues(local_mods)
         if problems and self.master:
             raise ValueError("\n".join(problems))
         plan = None
-        if self.game_id == "sts2" and any(m.source == "steam_workshop" for m in self.mods):
+        if self.game_id == "sts2" and any(m.source == "steam_workshop" for m in local_mods):
             snapshot = self.steam(self.game_dir)
             if not self.workshop_snapshot or not same_snapshot(snapshot, self.workshop_snapshot):
                 raise ValueError("Steam 工坊状态已变化或未同步，请重新扫描后预览。")
-            plan = build_plan(self.mods, snapshot, self.session.path)
-        data = self.session.render(self.mods, self.master, workshop_plan=plan)
+            plan = build_plan(local_mods, snapshot, self.session.path)
+        data = self.session.render(local_mods, self.master, workshop_plan=plan)
         token = uuid.uuid4().hex
         self.pending_plan = {"token": token, "revision": self.revision, "steam": plan, "data": data}
         lines = [f"目标：{self.session.path}", "关闭游戏和 ModTheSpire；Steam 保持运行。", ""]
         lines += [("开启 " if m.enabled else "关闭 ") + f"{m.nickname} [{m.workshop_id or '本地'}] {m.path.name}"
-                  for m in self.mods if m.enabled != self.baseline.get(m.key, False)]
+                  for m in local_mods if m.enabled != self.baseline.get(m.key, False)]
         if self.game_id == "sts2":
             lines.append("模组总开关：" + ("开启" if self.master else "关闭"))
             if plan is not None:
@@ -405,6 +439,7 @@ class Manager:
         return {"token": token, "text": "\n".join(lines)}
 
     def commit(self, token):
+        local_mods=[m for m in self.mods if not m.missing]
         pending = self.pending_plan
         if not pending or pending["token"] != token or pending["revision"] != self.revision:
             raise ValueError("选择已变化，请重新预览。")
@@ -414,13 +449,13 @@ class Manager:
         receipt = None
         if pending["steam"] is not None:
             roots = self.state.get("workshop_roots", self.catalog[self.game_id]["workshop_roots"])
-            backup, receipt, after = commit_plan(self.session, pending["data"], pending["steam"], self.mods,
+            backup, receipt, after = commit_plan(self.session, pending["data"], pending["steam"], local_mods,
                                                  self.game_dir, roots, self.directory / "backups", api=self.steam)
             self.workshop_snapshot = after
-            bind_snapshot(self.mods, after)
+            bind_snapshot(local_mods, after)
         else:
             backup = self.session.write(pending["data"], self.directory / "backups")
-        self.baseline = {m.key: m.enabled for m in self.mods}
+        self.baseline = {m.key: m.enabled for m in local_mods}
         self.status = "已应用，下次启动生效"
         self.changed()
         return {"backup": str(backup), "receipt": str(receipt) if receipt else ""}

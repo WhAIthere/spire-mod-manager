@@ -169,6 +169,7 @@ class VersionStore:
         return len(versions)
 
     def capture(self, game, mods, progress=lambda x:None, stop=None):
+        mods=[m for m in mods if not getattr(m,"missing",False)]
         packages = {}
         for m in mods: packages.setdefault(m.package_key, []).append(m.record())
         inventory = {}; previous = self.index['inventory'].get(game, {})

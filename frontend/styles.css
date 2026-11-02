@@ -158,3 +158,8 @@ dialog.task-dialog{width:min(1080px,calc(100vw - 32px));max-width:calc(100vw - 3
 @media(max-width:900px){.library-total{display:none}.batchbar:has(.tag-input:not([hidden])) #shownCaption{display:none}.toolbar .search-box{min-width:110px}.search-box kbd{display:none}}
 
 .brand img.brand-mark{width:40px;height:44px;object-fit:contain;flex-shrink:0;background:transparent;border-radius:0}
+
+.scan-status{display:grid;gap:1px;font-size:12px;color:var(--accent);white-space:nowrap;line-height:1.25}.scan-status small{font-size:12px;color:var(--muted)}.scan-status[data-phase=failed],.scan-status[data-phase=not_configured],.scan-status[data-phase=attention]{color:var(--warning)}
+.tag-chip.system-missing{background:color-mix(in srgb,var(--warning) 18%,var(--surface));color:var(--warning);border-color:color-mix(in srgb,var(--warning) 60%,var(--line));font-weight:600}
+.mod-row:has(.system-missing){opacity:1}.mod-row:has(.system-missing) .nickname{color:var(--text)}
+@media(max-width:1000px){.library-heading{gap:8px}.library-total{display:none}.topbar{gap:8px}.game-tabs button{min-width:70px}}

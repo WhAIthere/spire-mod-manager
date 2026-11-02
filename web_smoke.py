@@ -99,6 +99,25 @@ def first_run_check(window, api, output):
         assert not api._model.mods
         assert not (api._model.directory / 'credentials').exists()
         report['checks'].append('paths dialog available and second game handles missing installation without crashing')
+        from unittest.mock import patch
+        from core import atomic_json
+        fixture=api._model.directory/'example-list.json'
+        atomic_json(fixture,{'format':'spire-mod-manager-list','schema':1,'game':'sts2','mods':[{
+            'id':'ui-missing','name':'清单中的待获取模组','version':'1.0','source':'steam_workshop','workshop_id':'123',
+            'file':'example.json','alias':'清单验证','group':'导入的分组','tags':['推荐'],'enabled':True}]})
+        window.resize(1000,610)
+        with patch.object(api._window,'create_file_dialog',return_value=(str(fixture),)):
+            window.evaluate_js("document.getElementById('export').click()")
+            wait_js(window,"document.getElementById('dialogTitle').textContent==='模组清单'")
+            window.evaluate_js("document.getElementById('dialogButtons').lastElementChild.click()")
+            wait_js(window,"document.getElementById('dialogTitle').textContent==='导入清单预览'")
+            assert window.evaluate_js("document.getElementById('dialogBody').textContent.includes('本地匹配 0')")
+            window.evaluate_js("document.getElementById('dialogButtons').lastElementChild.click()")
+            wait_js(window,"window.spire.state.inventory.missing===1&&!document.getElementById('dialog').open")
+        assert window.evaluate_js("document.querySelector('.system-missing')?.textContent==='缺失'&&document.querySelector('.mod-row .switch').disabled")
+        assert window.evaluate_js("document.getElementById('scanStatus').textContent.includes('本地可用 0 / 列表 1')")
+        assert window.evaluate_js("document.getElementById('scanStatus').getBoundingClientRect().right<document.getElementById('scan').getBoundingClientRect().left")
+        report['checks'].append('native-picker list import preview, missing row, locked yellow badge, separate local inventory counts')
         from web_app import VERSION
         report.update(ok=True, version=VERSION)
         capture(window, Path(output).parent / 'public-first-run-preview.png')

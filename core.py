@@ -115,6 +115,8 @@ class Mod:
     disk_bytes: int | None = None
     package_bytes: int | None = None
     workshop_disabled: bool | None = None
+    missing: bool = False
+    wanted_enabled: bool = False
 
     @property
     def nickname(self):
@@ -131,6 +133,8 @@ class Mod:
     @property
     def key(self):
         relative = self.path.relative_to(self.package_root).as_posix() if self.package_root else self.path.name
+        if self.missing:
+            return f"missing:{self.source}:{self.id}@{self.workshop_id or 'local'}/{relative}"
         return f"{self.source}:{self.id}@{self.workshop_id or 'local'}/{relative}"
 
     @property
@@ -144,12 +148,13 @@ class Mod:
     def record(self):
         return {"id": self.id, "name": self.name, "version": self.version,
                 "alias": self.alias, "nickname": self.nickname,
-                "path": str(self.path), "source": self.source, "workshop_id": self.workshop_id,
+                "path": "" if self.missing else str(self.path), "source": self.source, "workshop_id": self.workshop_id,
                 "enabled": self.enabled, "group": self.group, "tags": self.tags,
                 "dependencies": self.dependencies, "compatibility": self.compatibility,
                 "disk_bytes": self.disk_bytes, "package_bytes": self.package_bytes,
                 "package_root": self.package_key, "package_title": self.package_title,
-                "loader_status": self.loader_status, "loadable": self.loadable}
+                "loader_status": self.loader_status, "loadable": self.loadable,
+                "missing": self.missing, "wanted_enabled": self.wanted_enabled}
 
 
 def read_legacy_json(path):
@@ -366,7 +371,8 @@ def filter_mods(mods, query="", group=None):
 def restore_profile(mods, profile):
     enabled = set(profile["enabled"])
     for mod in mods:
-        mod.enabled = mod.key in enabled or (mod.loadable and mod.legacy_key in enabled)
+        mod.wanted_enabled = mod.key in enabled or mod.legacy_key in enabled
+        mod.enabled = not mod.missing and (mod.key in enabled or (mod.loadable and mod.legacy_key in enabled))
 
 
 def dependency_issues(mods):

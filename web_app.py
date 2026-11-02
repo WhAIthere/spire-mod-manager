@@ -7,7 +7,7 @@ import sys
 import threading
 import traceback
 
-VERSION = "1.9.3"
+VERSION = "1.10.0"
 ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 ASSETS = Path(getattr(sys, "_MEIPASS", ROOT)) / "frontend"
 ICON_DIR = Path(getattr(sys, '_MEIPASS', ROOT)) / 'assets'

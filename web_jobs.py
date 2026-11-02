@@ -189,7 +189,7 @@ class Jobs:
             with model.lock:
                 self.value.update(summary=summary)
                 self._append(summary)
-                self._save_log(finishing=True);model.changed();self.value['running']=False
+                self._save_log(finishing=True);model.changed();self.value['running']=False;self.value['local_scanning']=False
         threading.Thread(target=worker,daemon=True).start()
 
 
@@ -197,6 +197,7 @@ class Jobs:
         model = self.model
         if not metadata_only: model.require_discard(discard)
         self._begin('scan', 1)
+        self.value['local_scanning']=not metadata_only
         game = model.game_id
         self.log_path = model.directory / 'logs' / ('scan-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '.log')
         self.report = {'game':game, 'refresh':'small' if metadata_only else 'large', 'results':[]}
@@ -210,8 +211,9 @@ class Jobs:
                     before=model.store.get('scan_catalog',{}).get(game,signature(model.mods))
                     if not metadata_only:
                         model.rescan(discard=True)
+                        self.value['local_scanning']=False
                         if model.issues or model.session is None: raise ValueError("本地扫描有异常，未更新缓存：" + "; ".join(model.issues))
-                    mods = list(model.mods)
+                    mods = [m for m in model.mods if not m.missing]
                     cache_enabled=bool(model.store.get('backup_cache_enabled',False))
                 def progress(text):
                     with model.lock:
@@ -285,5 +287,5 @@ class Jobs:
                 with model.lock:self.value['summary']='模组包操作失败：'+str(exc)
             finally:
                 with model.lock:
-                    self._append(self.value['summary']);self._save_log(finishing=True);model.changed();self.value['running']=False
+                    self._append(self.value['summary']);self._save_log(finishing=True);model.changed();self.value['running']=False;self.value['local_scanning']=False
         threading.Thread(target=worker,daemon=True).start()

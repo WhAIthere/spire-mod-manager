@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import webbrowser
+import uuid
+import mod_lists
 
 from core import atomic_json, dependency_issues
 from manager_model import Manager
@@ -19,6 +21,7 @@ class Api:
         self._window = None
         self._ready = False
         self._allow_close = False
+        self._list_preview = None
 
     def request(self, action, payload=None):
         try:
@@ -38,7 +41,7 @@ class Api:
 
     def _run(self, action, p):
         model, jobs = self._model, self._jobs
-        if jobs.value["running"] and action in ("game", "scan", "refresh_small", "cache_options", "settings", "account_save", "account_forget", "apply_preview", "apply_commit"):
+        if jobs.value["running"] and action in ("list_import_apply", "game", "scan", "refresh_small", "cache_options", "settings", "account_save", "account_forget", "apply_preview", "apply_commit"):
             raise ValueError("请先停止后台获取任务或等待备份完成，再切换游戏、配置或应用。")
         if action == "init":
             if not self._ready:
@@ -95,6 +98,15 @@ class Api:
         elif action in ("toggle", "undo", "redo", "master", "dependencies", "profile_save", "profile_restore",
                         "profile_delete", "alias", "group", "group_rename", "tags_add", "tags_remove", "tags_rename"):
             return model.edit(action, p)
+        elif action == 'list_forget_missing':
+            return mod_lists.forget_missing(model,p.get('keys',[]))
+        elif action == 'list_import_apply':
+            pending=self._list_preview
+            if not pending or p.get('token')!=pending['token'] or pending['game']!=model.game_id:
+                raise ValueError('清单预览已失效，请重新选择文件。')
+            result=mod_lists.import_list(model,pending['data'],bool(p.get('overwrite')),bool(p.get('switches',True)))
+            self._list_preview=None
+            return result
         elif action == "release_info":
             from release_store import info
             return info(model.versions)
@@ -194,6 +206,18 @@ class Api:
         """Only native pickers can authorize new export destinations through this API."""
         try:
             import webview
+            if kind=='list_import':
+                if self._jobs.value['running']:raise ValueError('请先结束后台任务再导入清单。')
+                values=self._window.create_file_dialog(webview.FileDialog.OPEN,file_types=('模组清单 JSON (*.json)',))
+                if not values:return {'ok':True,'path':''}
+                path=Path(values[0])
+                if path.stat().st_size>10_000_000:raise ValueError('清单文件超过 10 MB。')
+                with self._model.lock:
+                    data=mod_lists.normalize(json.loads(path.read_text(encoding='utf-8-sig')),self._model.game_id)
+                    token=uuid.uuid4().hex
+                    self._list_preview={'token':token,'game':self._model.game_id,'data':data}
+                    result=mod_lists.preview(self._model,data)
+                return {'ok':True,'path':str(path),'preview':result,'token':token}
             if kind in ('release_import','release_import_folder'):
                 folder=kind=='release_import_folder'
                 values=self._window.create_file_dialog(webview.FileDialog.FOLDER if folder else webview.FileDialog.OPEN,allow_multiple=not folder,file_types=() if folder else ('备份包 ZIP (*.zip)',))
@@ -239,8 +263,7 @@ class Api:
             path = Path(values[0])
             with self._model.lock:
                 if kind == "export":
-                    atomic_json(path, {"game": self._model.game_id, "config_path": self._model.config_path,
-                                       "mods": [m.record() for m in self._model.mods], "profiles": self._model.state.get("profiles", {})})
+                    atomic_json(path, mod_lists.export_list(self._model))
                 elif kind == "backup":
                     self._jobs.start_backup(path)
                 elif kind in ("release_export", "release_import"):
