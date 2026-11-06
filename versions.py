@@ -86,6 +86,8 @@ class VersionStore:
 
     @contextmanager
     def open_version(self, package, version):
+        if version.get('record_only') or not version['files']:
+            raise ValueError('这个版本仅有记录，没有备份文件，无法恢复。')
         archive = self.archive_path(package, version)
         if archive and archive.is_file():
             with zipfile.ZipFile(archive) as z:
@@ -139,7 +141,7 @@ class VersionStore:
         original = self.root / 'index-before-zip.json'
         if self.index_path.exists() and not original.exists():
             shutil.copyfile(self.index_path, original)
-        versions = [(p, v) for p in self.index['packages'].values() for v in p['versions']]
+        versions = [(p, v) for p in self.index['packages'].values() for v in p['versions'] if not v.get('record_only')]
         for n, (package, version) in enumerate(versions, 1):
             with self.open_version(package, version) as opener:
                 path = self._write_archive(package, version, opener)
@@ -168,7 +170,68 @@ class VersionStore:
             'Steam Key 单独保存在 credentials 中并由 Windows DPAPI 加密，不在这些 ZIP 中。\n', encoding='utf-8-sig')
         return len(versions)
 
-    def capture(self, game, mods, progress=lambda x:None, stop=None):
+    @staticmethod
+    def observed_files(root):
+        files = []
+        for path in sorted(root.rglob('*')):
+            if path.is_symlink() or not path.resolve().is_relative_to(root):
+                raise ValueError('模组目录含链接，未核对历史版本')
+            if path.is_file():
+                files.append((path, path.stat()))
+        return files
+
+    @staticmethod
+    def observation(records, root=None, observed=None):
+        values = []
+        for m in records:
+            p = Path(m['path'])
+            stat = p.stat()
+            values.append([m['id'], m.get('version', ''), str(p), stat.st_size, stat.st_mtime_ns])
+        # Assets can change without the manifest/JAR changing. Include the entire package.
+        tree = []
+        if root is not None:
+            root = Path(root).resolve()
+            for p, stat in (VersionStore.observed_files(root) if observed is None else observed):
+                tree.append([p.relative_to(root).as_posix(), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns])
+        return hashlib.sha256(json.dumps([sorted(values),tree], ensure_ascii=False).encode()).hexdigest()
+
+    def observe(self, game, mods):
+        """Remember encountered versions without claiming to possess their bytes."""
+        packages = {}
+        for m in mods:
+            if not m.missing and m.path.is_file():
+                packages.setdefault(m.package_key, []).append(m.record())
+        changed = False
+        for source, records in packages.items():
+            identity = game + ':' + str(Path(source).resolve()).casefold()
+            package = self.index['packages'].setdefault(identity, {'game': game, 'source': source, 'versions': []})
+            root = Path(source).resolve()
+            stamp = self.observation(records, root)
+            if any(v.get('observation') == stamp for v in package['versions']): continue
+            # Older indexes have content hashes but no observation fingerprint. Compare
+            # bytes before inventing a second version with the same author version number.
+            if any(not v.get('record_only') for v in package['versions']):
+                files = {}
+                for p in sorted(root.rglob('*')):
+                    if p.is_file():
+                        with p.open('rb') as stream:
+                            files[p.relative_to(root).as_posix()] = hashlib.file_digest(stream,'sha256').hexdigest()
+                if self.observation(records,root) != stamp: raise ValueError('核对期间模组文件变化，请稍后更新列表')
+                digest = hashlib.sha256(json.dumps(files,sort_keys=True).encode()).hexdigest()
+                known = next((v for v in package['versions'] if not v.get('record_only') and v['digest'] == digest), None)
+                if known:
+                    known.update(observation=stamp,mods=records,last_seen=datetime.now().isoformat(timespec='seconds'))
+                    package['current_digest'] = digest
+                    package['versions'] = [v for v in package['versions'] if not (v.get('record_only') and v.get('observation') in (stamp, self.observation(records)))]
+                    changed = True
+                    continue
+            package['versions'].append({'digest': stamp, 'observation': stamp, 'record_only': True,
+                'created': datetime.now().isoformat(timespec='seconds'), 'origin': 'observation', 'files': {}, 'mods': records})
+            package['current_digest'] = stamp
+            changed = True
+        if changed: self.save()
+
+    def capture(self, game, mods, progress=lambda x:None, stop=None, force=False, update_inventory=True):
         mods=[m for m in mods if not getattr(m,"missing",False)]
         packages = {}
         for m in mods: packages.setdefault(m.package_key, []).append(m.record())
@@ -178,32 +241,49 @@ class VersionStore:
             root = Path(source).resolve(); files = {}
             if not root.is_dir() or any(not Path(m['path']).is_file() for m in records):
                 raise ValueError('扫描后模组文件消失，请等 Steam 下载完成后重试')
-            before = [(p, p.stat()) for p in sorted(root.rglob('*')) if p.is_file()]
+            before = self.observed_files(root)
+            stamp = self.observation(records, root, before)
+            identity = game + ':' + str(root).casefold()
+            package = self.index['packages'].get(identity, {})
+            cached = next((v for v in package.get('versions', []) if v.get('observation') == stamp and v['files']), None)
+            if cached and not force:
+                archive = self.archive_path(package, cached)
+                if cached.get('export') or (archive and archive.is_file()):
+                    inventory[identity] = cached['digest']
+                    package['current_digest'] = cached['digest']
+                    continue
             for p, stat in before:
-                if p.is_symlink() or not p.resolve().is_relative_to(root): raise ValueError('模组目录含链接，停止快照')
                 rel = p.relative_to(root).as_posix(); safe_relative(rel)
                 with p.open('rb') as stream:
                     files[rel] = hashlib.file_digest(stream, 'sha256').hexdigest()
-                if (p.stat().st_size,p.stat().st_mtime_ns)!=(stat.st_size,stat.st_mtime_ns): raise ValueError('Steam 正在更改模组文件，请稍后重新扫描')
-            identity = game + ':' + str(Path(source).resolve()).casefold()
             known = {v['digest'] for v in self.index['packages'].get(identity, {}).get('versions', [])}
             identity, digest = self.add(game, source, files, records)
             package = self.index['packages'][identity]
             version = next(v for v in package['versions'] if v['digest'] == digest)
+            version['observation'] = stamp
+            version.update(mods=records,last_seen=datetime.now().isoformat(timespec='seconds'))
+            package['current_digest'] = digest
             try:
-                if not version.get('export') and (not version.get('archive') or not self.archive_path(package, version).is_file()):
+                if (force or not version.get('export')) and (not version.get('archive') or not self.archive_path(package, version).is_file()):
                     self._write_archive(package, version, lambda rel: root.joinpath(*PurePosixPath(rel).parts).open('rb'))
             except Exception:
                 if digest not in known:
                     package['versions'].remove(version)
                 raise
-            after = [(str(p),p.stat().st_size,p.stat().st_mtime_ns) for p in sorted(root.rglob('*')) if p.is_file()]
-            if after != [(str(p),s.st_size,s.st_mtime_ns) for p,s in before]: raise ValueError('快照期间目录变化，请重新扫描')
-            inventory[identity] = digest; self.save(); progress(f'已保存 {records[0]["nickname"]} · {len(files)} 个文件')
+            if self.observation(records, root) != stamp:
+                raise ValueError('快照期间目录变化，请重新扫描')
+            package['versions'] = [v for v in package['versions'] if not (v.get('record_only') and v.get('observation') in (stamp, self.observation(records)))]
+            inventory[identity] = digest; self.save()
+            archive = self.archive_path(package, version)
+            if version.get('export') and not (archive and archive.is_file()):
+                progress(f'已核对 {records[0]["nickname"]} · 与已导出版本一致，不重复缓存（{version["export"]["part"]}）')
+            else:
+                progress(f'已保存 {records[0]["nickname"]} · {len(files)} 个文件')
         if stop and stop.is_set(): return {'stopped': True}
         result = {'added':len(inventory.keys()-previous.keys()),'updated':sum(k in previous and previous[k]!=v for k,v in inventory.items()),
                   'missing':len(previous.keys()-inventory.keys()),'packages':len(inventory)}
-        self.index['inventory'][game] = inventory; self.save(); return result
+        if update_inventory: self.index['inventory'][game] = inventory
+        self.save(); return result
 
     def versions(self, game, mod_id=None):
         result = []
@@ -211,8 +291,35 @@ class VersionStore:
             if p['game']!=game: continue
             for v in reversed(p['versions']):
                 records=[m for m in v['mods'] if mod_id is None or m['id']==mod_id]
+                archive = self.archive_path(p,v)
+                local = bool(archive and archive.is_file()) or bool(v['files'] and not v.get('record_only') and all(self.blob(h).is_file() for h in v['files'].values()))
+                available = local or bool(v.get('export') and Path(self.index.get('release_locations',{}).get(v['export']['part'],'')).is_file())
                 if records: result.append({'package':identity,'digest':v['digest'],'created':v['created'],'source':p['source'],
-                    'origin':v['origin'],'mods':records,'files':len(v['files']),'archive':str(self.archive_path(p,v) or ''),'export':v.get('export'),'available':bool((self.archive_path(p,v) and self.archive_path(p,v).is_file()) or (v.get('export') and Path(self.index.get('release_locations',{}).get(v['export']['part'],'')).is_file()))})
+                    'origin':v['origin'],'mods':records,'files':len(v['files']),'archive':str(archive or ''),'export':v.get('export'),
+                    'backup_state':'local' if local else 'exported' if v.get('export') else 'recorded', 'available':available, 'record_only':v.get('record_only',False)})
+                    
+                if records:
+                    result[-1].update(current_file=p.get('current_digest')==v['digest'],current_match=p.get('current_digest')==v['digest'] and not v.get('record_only'),last_seen=v.get('last_seen',''))
+        from functools import cmp_to_key
+        from core import compare_versions
+        def order(a,b):
+            if mod_id and a['mods'] and b['mods']:
+                comparison=compare_versions(a['mods'][0].get('version',''),b['mods'][0].get('version',''))
+                if comparison:return -comparison
+            return (b['created']>a['created'])-(b['created']<a['created'])
+        result = sorted(result, key=cmp_to_key(order))
+        for row in result:
+            peers = [v for v in result if v['package']==row['package'] and not v['record_only'] and
+                     sorted((m['id'],m.get('version','')) for m in v['mods'])==sorted((m['id'],m.get('version','')) for m in row['mods'])]
+            row['same_version_variants'] = len(peers)
+            if not row['record_only'] and len(peers)>1:
+                pos = peers.index(row)
+                other = peers[pos+1] if pos+1<len(peers) else peers[pos-1]
+                package = self.index['packages'][row['package']]
+                a = next(v['files'] for v in package['versions'] if v['digest']==row['digest'])
+                b = next(v['files'] for v in package['versions'] if v['digest']==other['digest'])
+                row['file_changes'] = [{'file':name,'kind':'新增' if name not in b else '移除' if name not in a else '修改'}
+                                       for name in sorted(a.keys()|b.keys()) if a.get(name)!=b.get(name)]
         return result
 
     def import_bundle(self, path, progress=lambda x:None):
@@ -266,15 +373,17 @@ class VersionStore:
         finally:
             if stage.exists(): shutil.rmtree(stage)
 
-    def extract(self, identity, digest, destination, install_sts1=False):
+    def extract(self, identity, digest, destination, install_sts1=False, include=None):
         """Extract just one selected mod package, without replacing any existing file."""
         package=self.index['packages'][identity]
         version=next(v for v in package['versions'] if v['digest']==digest)
+        files = version['files'] if include is None else {rel:version['files'][rel] for rel in include}
+        if not files or version.get('record_only'): raise ValueError('这个版本没有备份文件可供取出。')
         destination=Path(destination).resolve();destination.mkdir(parents=True,exist_ok=True)
         stage=Path(tempfile.mkdtemp(prefix='.spire-extract-',dir=destination))
         try:
             with self.open_version(package,version) as opener:
-                for rel,expected in version['files'].items():
+                for rel,expected in files.items():
                     safe_relative(rel);out=stage.joinpath(*PurePosixPath(rel).parts);out.parent.mkdir(parents=True,exist_ok=True)
                     h=hashlib.sha256()
                     with opener(rel) as stream,out.open('wb') as target:

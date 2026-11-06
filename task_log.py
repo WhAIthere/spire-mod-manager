@@ -3,7 +3,7 @@ import copy
 
 class TaskLog:
     def __init__(self):
-        self.rows={};self.problems={};self.batches={};self.failed_batches={};self.sequence=0
+        self.rows={};self.problems={};self.batches={};self.failed_batches={};self.sequence=0;self.changes={}
     def row(self,key,text,status='working'):
         if key not in self.rows:
             if key!='stage' and 'stage' in self.rows:self.rows['stage']['status']='success'
@@ -58,7 +58,8 @@ class TaskLog:
                 if row['status']=='working':
                     row['status']='stopped'
                     if '等待' in row['text']:row['text']+=' · 已停止等待'
-        return {'rows':rows[-150:],'problems':[] if running else copy.deepcopy(list(self.problems.values()))}
+        return {'rows':rows[-150:],'problems':[] if running else copy.deepcopy(list(self.problems.values())),
+                'changes':{} if running else copy.deepcopy(self.changes)}
 
 def clean_saved_view(view):
     """Correct presentation mistakes in older saved overviews without rewriting raw logs."""

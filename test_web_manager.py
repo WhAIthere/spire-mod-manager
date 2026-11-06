@@ -46,12 +46,117 @@ class WebManagerTests(unittest.TestCase):
     def edit(self, action, **payload):
         result = self.api.request(action, payload)
         self.assertTrue(result['ok'], result)
-        if action == 'scan':
+        if action in ('scan','refresh_selected'):
             deadline = time.monotonic() + 10
             while self.api._jobs.value['running'] and time.monotonic() < deadline:
                 time.sleep(.02)
             self.assertFalse(self.api._jobs.value['running'])
         return result
+
+    def test_local_only_refresh_keeps_separate_workshop_work_for_later(self):
+        self.edit('game',game='sts2')
+        self.model.store['workshop_access']={'method':'account_api'}
+        self.api._jobs.api_key='test'
+        def titles(_app,ids,progress,**kwargs):
+            for number,item in enumerate(ids,1):
+                progress(number,len(ids),{'status':'success','id':item,'title':'Title '+item})
+        with patch('web_jobs.fetch_workshop_titles',side_effect=titles) as names, \
+                patch('covers.fetch_covers',return_value={'settled':['123','456']}) as covers:
+            self.edit('refresh_selected',parts=['local'],discard=True)
+            names.assert_not_called()
+            covers.assert_not_called()
+            with patch.object(self.model,'rescan',side_effect=AssertionError('metadata only')):
+                self.edit('refresh_selected',parts=['titles'])
+                self.assertEqual(names.call_args.args[1],['123','456'])
+                covers.assert_not_called()
+                self.edit('refresh_selected',parts=['covers'])
+                names.assert_called_once()
+                self.assertEqual(covers.call_args.args[2],['123','456'])
+            self.assertEqual(self.model.store['scan_refresh_pending']['sts2'],{'titles':[],'covers':[]})
+            self.edit('scan',discard=True)
+            names.assert_called_once()
+            covers.assert_called_once()
+
+    def test_all_workshop_refresh_reaches_unchanged_items_without_rescanning(self):
+        self.edit('game',game='sts2')
+        self.model.store['workshop_access']={'method':'account_api'}
+        self.api._jobs.api_key='test'
+        with patch.object(self.model,'rescan',side_effect=AssertionError('metadata only')), \
+                patch('web_jobs.fetch_workshop_titles') as names, \
+                patch('covers.fetch_covers',return_value={'settled':['123','456']}) as covers:
+            self.edit('refresh_selected',parts=['covers'],scope='all')
+            names.assert_not_called()
+            self.assertEqual(covers.call_args.args[2],['123','456'])
+            self.assertTrue(covers.call_args.args[-1])
+
+    def test_rollback_forces_backup_installs_old_jar_and_leaves_config_for_preview(self):
+        self.model.versions.capture('sts1',self.model.mods)
+        old=self.model.versions.versions('sts1','a')[0]
+        jar=self.root/'sts1/mods/a.jar'
+        with zipfile.ZipFile(jar,'w') as z:z.writestr('ModTheSpire.json',json.dumps({'modid':'a','name':'a','version':'2'}))
+        self.model.rescan(True);self.model.store['backup_cache_enabled']=False
+        original=self.one.read_bytes()
+        with patch('manager_model.running_game_processes',return_value=[]):
+            result=self.model.rollback_version(old['package'],old['digest'],'a')
+        self.assertFalse(jar.exists());self.assertTrue(Path(result['path']).is_file())
+        self.assertEqual(self.one.read_bytes(),original)
+        a=next(m for m in self.model.mods if m.id=='a');self.assertEqual(a.version,'1.0');self.assertTrue(a.enabled)
+        b=next(m for m in self.model.mods if m.id=='b');self.assertTrue(b.path.is_file())
+        self.assertTrue(any(any(m['version']=='2' for m in v['mods']) and v['backup_state']=='local' for v in self.model.versions.versions('sts1','a')))
+        self.model.prepare_apply()
+
+    def test_sts2_rollback_prepares_local_choice_and_disables_both_workshop_copies(self):
+        (self.root/'sts2').mkdir(exist_ok=True)
+        self.model.change_game('sts2')
+        self.model.versions.capture('sts2',self.model.mods)
+        old=next(v for v in self.model.versions.versions('sts2','same') if v['source'].endswith('123'))
+        atomic_json(self.root/'sts2-workshop/123/same.json',{'id':'same','version':'2','has_dll':False})
+        self.model.rescan(True);original=self.two.read_bytes()
+        with patch('manager_model.running_game_processes',return_value=[]):
+            result=self.model.rollback_version(old['package'],old['digest'],'same')
+        self.assertEqual(self.two.read_bytes(),original)
+        selected=[m for m in self.model.mods if m.enabled]
+        self.assertEqual(len(selected),1);self.assertEqual(selected[0].source,'mods_directory');self.assertEqual(selected[0].version,'1.0')
+        self.assertEqual(json.loads((self.root/'sts2-workshop/123/same.json').read_text())['version'],'2')
+        plan=self.model.prepare_apply();self.assertIn('关闭',plan['text'])
+        self.assertTrue(all(self.model.pending_plan['steam']['desired'].values()))
+        self.assertEqual(Path(result['path']).parent,self.root/'sts2/mods')
+
+    def test_rollback_corrupt_backup_does_not_change_current_files(self):
+        self.model.versions.capture('sts1',self.model.mods)
+        old=self.model.versions.versions('sts1','a')[0];before=(self.root/'sts1/mods/a.jar').read_bytes()
+        with zipfile.ZipFile(old['archive'],'w') as z:z.writestr('a.jar',b'broken')
+        with patch('manager_model.running_game_processes',return_value=[]), self.assertRaises(Exception):
+            self.model.rollback_version(old['package'],old['digest'],'a')
+        self.assertEqual((self.root/'sts1/mods/a.jar').read_bytes(),before)
+
+    def test_scan_user_log_has_explicit_completion_row(self):
+        self.edit('scan',discard=True)
+        rows=self.api._jobs.snapshot()['user_log']['rows']
+        self.assertEqual(rows[-1]['id'],'completion')
+        self.assertEqual(rows[-1]['status'],'success')
+        self.assertIn('模组列表更新完成',rows[-1]['text'])
+
+    def test_disabled_mod_still_has_predicted_loader_candidate(self):
+        m=self.model.mods[0];m.enabled=False
+        detail=self.model.details(m.key)
+        self.assertTrue(next(c for c in detail['copies'] if c['path']==str(m.path))['predicted'])
+        self.assertTrue(any(v['current_file'] for v in detail['versions']))
+
+    def test_scan_change_details_include_added_updated_and_disappeared_names(self):
+        self.edit('scan',discard=True)
+        (self.root/'sts1/mods/b.jar').unlink()
+        for name,version in [('a','2.0'),('c','1.0')]:
+            with zipfile.ZipFile(self.root/'sts1/mods'/(name+'.jar'),'w') as z:
+                z.writestr('ModTheSpire.json',json.dumps({'modid':name,'name':name,'version':version}))
+        self.edit('scan',discard=True)
+        changes=self.api._jobs.snapshot()['user_log']['changes']
+        self.assertEqual([m['id'] for m in changes['added']],['c'])
+        self.assertEqual([m['id'] for m in changes['missing']],['b'])
+        self.assertEqual(changes['updated'][0]['previous_version'],'1.0')
+        self.assertEqual(changes['updated'][0]['version'],'2.0')
+        saved=read_json(self.api._jobs.log_path.with_suffix('.json'))
+        self.assertEqual(saved['user_log']['changes'],changes)
 
     def test_api_introduction_dismissal_persists_without_credentials(self):
         self.assertFalse(self.model.snapshot()['api_intro_seen'])

@@ -193,23 +193,44 @@ class Jobs:
         threading.Thread(target=worker,daemon=True).start()
 
 
-    def start_scan(self, discard=False, metadata_only=False):
+    def start_scan(self, discard=False, metadata_only=False, parts=None, scope='changed'):
         model = self.model
-        if not metadata_only: model.require_discard(discard)
+        components = {'local', 'titles', 'covers'}
+        if parts is None:
+            parts = ['titles', 'covers'] if metadata_only else list(components)
+        if (not isinstance(parts, list) or not parts or
+                any(not isinstance(part, str) or part not in components for part in parts) or
+                scope not in ('changed', 'all')):
+            raise ValueError('请选择至少一个有效的更新项目。')
+        parts = set(parts)
+        local = 'local' in parts
+        if local and getattr(model,'demo_mode',False):
+            raise ValueError('空白清单体验不扫描真实文件。')
+        if local: model.require_discard(discard)
+        all_workshop = metadata_only or scope == 'all'
+        labels = [label for part,label in [('local','本地文件'),('titles','工坊名称'),('covers','工坊封面')] if part in parts]
         self._begin('scan', 1)
-        self.value['local_scanning']=not metadata_only
+        self.value['local_scanning']=local
         game = model.game_id
-        self.log_path = model.directory / 'logs' / ('scan-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '.log')
-        self.report = {'game':game, 'refresh':'small' if metadata_only else 'large', 'results':[]}
+        self.log_path = model.directory / 'logs' / ('scan-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.log')
+        self.report = {'game':game, 'parts':sorted(parts), 'scope':'all' if all_workshop else 'changed', 'results':[]}
         def worker():
             from versions import VersionStore
             from covers import fetch_covers
             try:
                 def signature(mods):
-                    return {m.key:[m.version,m.name,m.disk_bytes] for m in mods}
+                    return {m.key:[m.version,m.name,m.disk_bytes,m.scan_stamp] for m in mods if not m.missing}
                 with model.lock:
-                    before=model.store.get('scan_catalog',{}).get(game,signature(model.mods))
-                    if not metadata_only:
+                    saved_before = model.store.get('scan_catalog', {}).get(game)
+                    before = saved_before if saved_before is not None else signature(model.mods)
+                    old_pending = model.store.get('scan_workshop_pending', {}).get(game, [])
+                    saved_pending = model.store.get('scan_refresh_pending', {}).get(game, {})
+                    pending = {part:set(saved_pending.get(part, old_pending)) for part in ('titles','covers')}
+                    def list_item(m):
+                        return {'name':m.nickname,'id':m.id,'version':m.version,'workshop_id':m.workshop_id}
+                    before_items=dict(model.store.get('scan_items',{}).get(game,{}))
+                    before_items.update({m.key:list_item(m) for m in model.mods})
+                    if local:
                         model.rescan(discard=True)
                         self.value['local_scanning']=False
                         if model.issues or model.session is None: raise ValueError("本地扫描有异常，未更新缓存：" + "; ".join(model.issues))
@@ -220,46 +241,161 @@ class Jobs:
                         self.value['summary'] = text
                         self._append(text)
                 after=signature(mods)
-                summary={'added':len(after.keys()-before.keys()),'updated':sum(k in before and before[k]!=v for k,v in after.items()),'missing':len(before.keys()-after.keys())}
-                if not metadata_only:
+                added_keys = after.keys() - before.keys()
+                removed_keys = before.keys() - after.keys()
+                updated_keys = {
+                    key for key in after.keys() & before.keys()
+                    if after[key][:len(before[key])] != before[key]
+                }
+                def save_pending():
+                    model.store.setdefault('scan_refresh_pending',{})[game] = {
+                        part:sorted(ids) for part,ids in pending.items()
+                    }
+                    model.store.get('scan_workshop_pending',{}).pop(game,None)
+                summary = {'added':0,'updated':0,'missing':0} if not local else {
+                    'added':len(added_keys),'updated':len(updated_keys),'missing':len(removed_keys)
+                }
+                if local:
+                    changed_keys = added_keys | updated_keys
+                    # Older installations establish a file-stamp baseline once.
+                    changed_keys |= {k for k in after if saved_before is None or len(before.get(k, [])) < 4}
+                    local_ids = {m.workshop_id for m in mods if m.workshop_id}
+                    changed_ids = {m.workshop_id for m in mods if m.key in changed_keys and m.workshop_id}
+                    for ids in pending.values():
+                        ids.intersection_update(local_ids)
+                        ids.update(changed_ids)
+                    def item(key,removed=False):
+                        values=dict(before_items.get(key,{'name':before[key][1],'version':before[key][0]})) if removed else list_item(next(m for m in mods if m.key==key))
+                        if not removed and key in before:
+                            values['previous_version']=before[key][0]
+                            fields=[name for index,name in enumerate(('版本','名称','占用空间','文件状态')) if index < len(before[key]) and before[key][index]!=after[key][index]]
+                            values['reason']='、'.join(fields)+'变化'
+                        return values
+                    self.user_log.changes={'added':[item(k) for k in sorted(after.keys()-before.keys())],
+                        'updated':[item(k) for k in sorted(updated_keys)],
+                        'missing':[item(k,True) for k in sorted(before.keys()-after.keys())]}
                     if cache_enabled:
                         store = VersionStore(model.directory)
                         store.capture(game,mods,progress,self.stop)
                         with model.lock:model.versions=store
-                    else:progress('缓存已关闭：只更新模组列表，不复制模组文件。')
+                    else:
+                        store = VersionStore(model.directory)
+                        changed_packages = {m.package_key for m in mods if m.key in changed_keys}
+                        store.observe(game,[m for m in mods if m.package_key in changed_packages])
+                        with model.lock:model.versions=store
+                        progress('缓存已关闭：保留版本记录，不复制模组文件。')
                     with model.lock:
-                        model.store.setdefault('scan_catalog',{})[game]=after;model.save();model.changed()
+                        model.store.setdefault('scan_catalog',{})[game]=after
+                        save_pending()
+                        model.store.setdefault('scan_items',{})[game]={m.key:list_item(m) for m in mods}
+                        model.save();model.changed()
                     progress(f"列表变化：新增 {summary['added']} · 信息更新 {summary['updated']} · 本地消失 {summary['missing']}（已有备份记录保留）")
-                else:progress('更新标题与封面：只补查当前列表的工坊标题和封面，不扫描磁盘、不缓存文件。')
+                else:progress('仅更新所选工坊资料，不扫描磁盘、不缓存模组文件。')
                 self.report['changes']=summary
                 def cover_progress(done,total,item,text):
                     with model.lock:self.user_log.cover(done,total,item,text)
                     progress(f'封面 {done}/{total} · {text}')
-                ids = sorted({m.workshop_id for m in mods if m.workshop_id})
-                key = (self.api_key or load_key(model.directory / 'credentials/steam-api-key.bin')) if model.store.get('workshop_access',{}).get('method')=='account_api' else ''
-                if ids and not self.stop.is_set():
+                with model.lock:
+                    workshop_ids = {m.workshop_id for m in model.mods if m.workshop_id}
+                title_ids,cover_ids = (
+                    sorted(workshop_ids if all_workshop else pending[part] & workshop_ids) if part in parts else []
+                    for part in ('titles','covers')
+                )
+                if parts & {'titles','covers'}:
+                    progress(f"工坊资料（{'当前清单' if all_workshop else '新增、文件变化或上次未完成'}）："
+                             + ' · '.join(f'{label} {len(ids)} 项' for part,label,ids in
+                                          [('titles','名称',title_ids),('covers','封面',cover_ids)] if part in parts))
+                key = (self.api_key or load_key(model.directory / 'credentials/steam-api-key.bin')) if (
+                    (title_ids or cover_ids) and model.store.get('workshop_access',{}).get('method')=='account_api') else ''
+                title_done = set()
+                if title_ids and not self.stop.is_set():
                     def title_progress(done,total,entry):
                         with model.lock:
                             self.user_log.title(entry)
                             model.workshop_health(entry)
                             if entry['status']=='success': model.apply_titles({entry['id']:entry['title']},False,{entry['id']})
+                            if entry['status'] in ('success','removed') or entry.get('suspected'):
+                                title_done.add(entry['id'])
                             self.report['results'].append(entry)
                             self.value.update(done=done,total=total)
                             progress(f"工坊 {done}/{total} · {entry['id']} · 第 {entry.get('round','—')} 轮 · {entry['status']} · HTTP {entry.get('http_status','—')} · 网络耗时 {entry.get('seconds','—')} 秒 · 批量 {entry.get('batch_size','—')} 项 · {entry.get('error','')}")
-                    fetch_workshop_titles(APP_IDS[game],ids,title_progress,checkpoint=model.directory/'workshop_queue'/f'{game}.json',
+                    fetch_workshop_titles(APP_IDS[game],title_ids,title_progress,checkpoint=model.directory/'workshop_queue'/f'{game}.json',
                                           stop_event=self.stop,force=True,api_key=key)
-                    if key and not self.stop.is_set():
-                        fetch_covers(model.directory,game,[i for i in ids if model.state.get('workshop_health',{}).get(i,{}).get('status')!='存疑'],key,lambda d,t,i,text:cover_progress(d,t,i,text),self.stop,False)
-                    elif not key: progress('尚未配置账号 Key，标题使用网页；封面请配置账号后补齐。')
+                    with model.lock:
+                        pending['titles'].difference_update(title_done)
+                        save_pending();model.save()
+                cover_done = set()
+                if cover_ids and not self.stop.is_set():
+                    if key:
+                        cover_result = fetch_covers(model.directory,game,cover_ids,key,cover_progress,self.stop,not metadata_only)
+                        cover_done.update(cover_result['settled'])
+                        with model.lock:
+                            pending['covers'].difference_update(cover_done)
+                            save_pending();model.save()
+                    else:
+                        progress('封面已跳过：请在 Steam API 管理中启用账号 API。')
                 removed=len({e['id'] for e in self.report['results'] if e['status']=='removed'})
-                pending=len(ids)-len({e['id'] for e in self.report['results'] if e['status'] in ('removed','success')})
-                result=f"{'标题与封面更新' if metadata_only else '模组列表更新'}{'已停止' if self.stop.is_set() else '完成'} · 新增 {summary.get('added',0)} · 更新 {summary.get('updated',0)} · 本地消失 {summary.get('missing',0)} · 确认下架 {removed} · 工坊待确认 {pending}"
+                result = ('完整更新完成' if local and all_workshop and parts == components else
+                          '模组列表更新完成' if local else '工坊资料更新完成') + ' · ' + '、'.join(labels)
+                if local:
+                    result += f" · 新增 {summary['added']} · 更新 {summary['updated']} · 本地消失 {summary['missing']}"
+                if title_ids:
+                    result += f" · 确认下架 {removed} · 名称待确认 {len(title_ids)-len(title_done)}"
+                if cover_ids and not key:
+                    result += ' · 封面已跳过（未启用账号 API）'
+                elif len(cover_ids) > len(cover_done):
+                    result += f' · 封面待确认 {len(cover_ids)-len(cover_done)}'
             except Exception as exc:
                 result='扫描未完成：'+str(exc)
             with model.lock:
                 if self.stop.is_set():result='任务已停止，已完成结果已保留。'
-                self.value.update(summary=result)
+                self.user_log.row('completion',result,'stopped' if self.stop.is_set() else 'warning' if result.startswith('扫描未完成') else 'success')
+                self.value.update(summary=result,local_scanning=False)
                 self._append(result); self._save_log(finishing=True); model.changed(); self.value['running'] = False
+        threading.Thread(target=worker,daemon=True).start()
+
+    def start_subscriptions(self,plan):
+        from subscriptions import validate
+        validate(self.model,plan)
+        self._begin('subscribe',len(plan['items']))
+        self.log_path=self.model.directory/'logs'/('subscribe-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'.log')
+        self.report={'game':'sts2','results':[]}
+        self._append('已确认订阅名单；Steam 必须保持运行并登录，订阅后会自动安排下载。')
+        def worker():
+            for number,item in enumerate(plan['items'],1):
+                if self.stop.is_set():break
+                ident=item['id']
+                with self.model.lock:
+                    self.user_log.row('subscribe:'+ident,item['name']+' ['+ident+'] · 正在提交并等待 Steam 确认')
+                    self._append('订阅 '+ident+'：等待 Steam 确认')
+                try:
+                    # The helper rechecks the account and skips already subscribed IDs.
+                    result=self.model.steam(plan['game_dir'],command='subscribe',item=ident,account=plan['account'])
+                    if result.get('status') not in ('already','subscribed'):raise ValueError('Steam 返回了未识别的订阅结果，请核对；未重试。')
+                    text='已订阅，无需重复提交' if result['status']=='already' else '订阅成功 · 等待 Steam 下载／安装'
+                    with self.model.lock:
+                        self.report['results'].append({'id':ident,**result})
+                        if self.model.subscription_view is not None:self.model.subscription_view['ids'].add(ident)
+                        if result['status']=='subscribed' and self.model.subscription_snapshot is not None:
+                            self.model.subscription_snapshot = {
+                                **self.model.subscription_snapshot,
+                                'items': {**self.model.subscription_snapshot['items'], ident:result},
+                            }
+                        self.model.changed()
+                        self.user_log.row('subscribe:'+ident,item['name']+' ['+ident+'] · '+text,'success')
+                        self.value['done']=number;self._append(ident+' · '+text);self._save_log()
+                except Exception as exc:
+                    with self.model.lock:
+                        self.report['results'].append({'id':ident,'status':'unconfirmed','error':str(exc)})
+                        self.user_log.row('subscribe:'+ident,item['name']+' ['+ident+'] · '+str(exc),'warning')
+                        self.user_log.problems[('subscribe',ident)]={'id':ident,'phase':'订阅','reason':str(exc)}
+                        self._append('订阅未确认 '+ident+' · '+str(exc))
+                    break
+            with self.model.lock:
+                bad=any(r.get('status')=='unconfirmed' for r in self.report['results'])
+                text=('订阅任务已停止' if self.stop.is_set() else '订阅任务有未确认项目' if bad else '订阅任务已完成')+' · 已处理 '+str(len(self.report['results']))+'/'+str(len(plan['items']))+'；已提交的订阅可能已开始下载。下载完成后请更新模组列表并核对开关。'
+                self.user_log.row('completion',text,'warning' if bad else 'success')
+                self.value.update(summary=text,running=False);self._append(text);self._save_log(finishing=True)
         threading.Thread(target=worker,daemon=True).start()
 
     def start_release(self, path, importing=False):

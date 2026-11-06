@@ -2,7 +2,7 @@
 import re
 from core import filter_mods
 
-MODES = ("不分组", "文件夹分组", "自定义分组", "标签分组")
+MODES = ("不分组", "文件夹分组", "自定义分组", "标签分组", "合集分组")
 
 
 def natural(value):
@@ -33,6 +33,8 @@ def view_sections(mods, *, mode="不分组", query="", group=None, hide_unavaila
         return visible, []
     sections = {}
     def memberships(mod):
+        if mode == '合集分组':
+            return [('collection:'+c['id'],c['title']) for c in mod.collections] or [('no-collection:','未归属合集')]
         if mode == "文件夹分组":
             return [(mod.package_key, mod.folder_label)]
         if mode == "标签分组":

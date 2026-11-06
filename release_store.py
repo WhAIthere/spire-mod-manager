@@ -16,11 +16,26 @@ def file_hash(path):
 
 
 def pending(store):
-    return [(key,p,v) for key,p in store.index['packages'].items() for v in p['versions'] if not v.get('export')]
+    return [(key,p,v) for key,p in store.index['packages'].items() for v in p['versions'] if not v.get('export') and not v.get('record_only')]
 
 
 def info(store):
     return {'pending':len(pending(store)), 'releases':list(store.index.get('releases',{}).values())}
+
+
+def package_relative_file(record, source, files):
+    """Resolve a portable member, or convert the original path in an older manifest."""
+    relative = record.get('file')
+    if relative in files:
+        return relative
+    if record.get('path') and source:
+        try:
+            relative = Path(record['path']).relative_to(Path(source)).as_posix()
+        except ValueError:
+            return None
+        if relative in files:
+            return relative
+    return None
 
 
 def export_release(store, destination, limit=512*1024**2, progress=lambda text:None, remove_loose=True):
@@ -47,8 +62,20 @@ def export_release(store, destination, limit=512*1024**2, progress=lambda text:N
                 for identity,package,version in group:
                     loose=store.archive_path(package,version)
                     store._verify_archive(loose,version['files'])
-                    entry={'package':identity,'game':package['game'],'source':package['source'],
-                           'version':{k:v for k,v in version.items() if k!='export'},'entry':version['archive'],'sha256':file_hash(loose)}
+                    folder = PurePosixPath(version['archive']).parts[1]
+                    records = []
+                    for mod in version['mods']:
+                        record = {k: mod[k] for k in ('id','name','nickname','version','compatibility','workshop_id') if k in mod}
+                        relative = package_relative_file(mod, package['source'], version['files'])
+                        if relative:
+                            record['file'] = relative
+                        records.append(record)
+                    entry = {
+                        'package': f"backup:{package['game']}:{folder}", 'game': package['game'],
+                        'source': folder, 'entry': version['archive'], 'sha256': file_hash(loose),
+                        'version': {**{k:version[k] for k in ('digest','files','created','origin','archive')},
+                                    'mods': records},
+                    }
                     entries.append(entry);outer.write(loose,entry['entry'])
                 part={'schema':1,'kind':'spire-mod-release','batch':batch,'part':name,'entries':entries}
                 outer.writestr('manifest.json',json.dumps(part,ensure_ascii=False,indent=2))
@@ -140,6 +167,12 @@ def register_part(store, path, progress=lambda text:None):
             v=e['version'];folder=PurePosixPath(e['entry']).parts[1]
             package=store.index['packages'].get(e['package'])
             version=next((x for x in package['versions'] if x['digest']==v['digest']),None) if package else None
+            if not version and str(e['package']).startswith('backup:'):
+                matches = [(p, candidate) for p in store.index['packages'].values() if p['game']==e['game']
+                           for candidate in p['versions'] if candidate['digest']==v['digest']
+                           and PurePosixPath(candidate.get('archive') or '').parts[1:2]==(folder,)]
+                if len(matches)==1:
+                    package,version=matches[0]
             if not version:
                 identity='backup:'+e['game']+':'+folder
                 package=store.index['packages'].setdefault(identity,{'game':e['game'],'source':folder,'external':True,'versions':[]})
@@ -148,7 +181,11 @@ def register_part(store, path, progress=lambda text:None):
                     records=[]
                     for m in v.get('mods',[]):
                         if not isinstance(m,dict) or not isinstance(m.get('id'),str):raise ValueError('无效模组信息')
-                        records.append({k:m[k] for k in ('id','name','nickname','version','compatibility','workshop_id') if k in m})
+                        record = {k:m[k] for k in ('id','name','nickname','version','compatibility','workshop_id') if k in m}
+                        relative = package_relative_file(m, e.get('source'), v['files'])
+                        if relative:
+                            record['file'] = relative
+                        records.append(record)
                     if not records:records=[{'id':folder,'name':'模组 '+folder,'version':'未声明','workshop_id':folder if folder.isdigit() else ''}]
                     for m in records:m.setdefault('name',m['id'])
                     version={'digest':v['digest'],'files':v['files'],'mods':records,'created':v.get('created',''),'origin':'import','archive':e['entry']}

@@ -34,6 +34,7 @@ function checkbox(text, checked=false) {const n=el('label','check-line');const b
 function options(select, values, chosen) {select.replaceChildren(...values.map(v=>{const o=el('option','',v.label??v);o.value=v.value??v;return o;}));if(chosen!==undefined)select.value=chosen;}
 const gameViews=new Map();
 let state=null, mods=new Map(), selected=new Set(), focusRow='', lastRow='', anchor=-1, flat=[], rowById=new Map(), collapsed=new Set(), nodes=new Map();
+let subscriptionPicked=new Set();
 let job={version:-1,running:false,kind:'',lines:[]}, busy=0, queue=Promise.resolve(), pollRunning=false, themePending=false;
 let toastTimer, searchTimer, scrollFrame=0, dialogResolve=null, currentDialog='', closePending=false;
 const media=matchMedia('(prefers-color-scheme: dark)');let currentTheme='system';
@@ -41,7 +42,7 @@ function theme(value, notify=false) {currentTheme=value;const dark=value==='dark
 media.addEventListener('change',()=>{if(currentTheme==='system')theme('system');});theme('system');
 function toast(text,error=false) {clearTimeout(toastTimer);$('toast').textContent=text;$('toast').classList.toggle('error',error);$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,error?6500:3500);}
 function markBusy(value) {busy+=value;$('busyLine').hidden=busy<=0;document.body.classList.toggle('working',busy>0);updateControls();}
-function updateControls() {const blocked=busy>0, running=job.running;['scan','smallRefresh','cacheSettings','apiSettings','settings'].forEach(id=>$(id).disabled=blocked||running);document.querySelectorAll('[data-game]').forEach(n=>n.disabled=blocked||running);$('apply').disabled=blocked||running||!state?.ready;$('undo').disabled=blocked||!state?.undo;$('redo').disabled=blocked||!state?.redo;$('master').disabled=blocked||state?.game!=='sts2';['details','workshop','setGroup','manageTags','addTag'].forEach(id=>$(id).disabled=blocked||!selected.size);$('quickTag').closest('.tag-input').hidden=!selected.size;$('restoreProfile').disabled=blocked||!$('profile').value;$('saveProfile').disabled=blocked||!state?.ready;$('releasePacks').disabled=blocked||running;}
+function updateControls() {const blocked=busy>0, running=job.running;['steamImport','scan','chooseRefresh','cacheSettings','apiSettings','settings'].forEach(id=>$(id).disabled=blocked||running);document.querySelectorAll('[data-game]').forEach(n=>n.disabled=blocked||running);$('apply').disabled=blocked||running||!state?.ready;$('undo').disabled=blocked||!state?.undo;$('redo').disabled=blocked||!state?.redo;$('master').disabled=blocked||state?.game!=='sts2';['details','workshop','setGroup','manageTags','addTag'].forEach(id=>$(id).disabled=blocked||!selected.size);$('quickTag').closest('.tag-input').hidden=!selected.size;$('restoreProfile').disabled=blocked||!$('profile').value;$('saveProfile').disabled=blocked||!state?.ready;$('releasePacks').disabled=blocked||running;$('subscriptionMode').disabled=blocked||running||state?.game!=='sts2';$('submitSubscriptions').disabled=blocked||running||!subscriptionPicked.size||state?.demo_mode;$('refreshSubscriptions').disabled=blocked||running;$('pickSelected').disabled=blocked||running||!selected.size;$('dependencies').disabled=blocked||running||state?.subscription_mode;if(state?.subscription_mode){$('restoreProfile').disabled=true;$('undo').disabled=true;$('redo').disabled=true;}}
 function accept(response) {if(response.state&&(!state||response.state.revision>=state.revision))renderState(response.state);if(response.job&&response.job.version>=job.version){job={...job,...response.job};updateJob();}updateControls();}
 async function rpc(action,payload={}) {const r=await window.pywebview.api.request(action,payload);if(!r.ok)throw Error(r.error||'操作失败');accept(r);return r.result;}
 function act(action,payload={},heavy=false) {const task=async()=>{if(heavy)markBusy(1);try{return await rpc(action,payload);}finally{if(heavy)markBusy(-1);}};const result=queue.then(task);queue=result.catch(()=>{});return result;}
@@ -57,17 +58,22 @@ async function discard() {return !state?.dirty||await confirm('放弃未应用�
 
 function renderState(s) {const oldGame=state?.game,oldMode=state?.view.mode,switched=oldGame&&oldGame!==s.game;
   if(switched)gameViews.set(oldGame,{selected:[...selected],collapsed:[...collapsed],focusRow,lastRow,anchor,scroll:$('viewport').scrollTop});
-  state=s;mods=new Map(s.mods.map(m=>[m.key,m]));
+  if(switched||Boolean(state?.subscription_mode)!==Boolean(s.subscription_mode))subscriptionPicked.clear();
+  subscriptionPicked=new Set([...subscriptionPicked].filter(k=>(s.subscription_keys||[]).includes(k)));
+  state=s;
+  $('scanLabel').textContent=metadataRefreshOnly(s)?'更新工坊资料':'更新模组列表';
+  $('scan').title=metadataRefreshOnly(s)?'刷新清单中的工坊名称、补齐缺失封面，包含尚未下载的模组':'扫描本地文件，更新新增、文件变化或上次未完成的工坊名称和封面';
+  mods=new Map(s.mods.map(m=>[m.key,m]));
   if(switched){const saved=gameViews.get(s.game);selected=new Set(saved?.selected||[]);collapsed=new Set(saved?.collapsed||[]);focusRow=saved?.focusRow||'';lastRow=saved?.lastRow||'';anchor=saved?.anchor??-1;nodes.clear();$('rows').replaceChildren();}
   selected=new Set([...selected].filter(k=>mods.has(k)));if(!switched&&oldMode!==s.view.mode)collapsed.clear();
   document.querySelectorAll('[data-game]').forEach(n=>{const on=n.dataset.game===s.game;n.title=(s.dirty_games||[]).includes(n.dataset.game)?'有未应用的开关修改':'';n.classList.toggle('active',on);n.setAttribute('aria-selected',String(on));});
   if(document.activeElement!==$('search'))$('search').value=s.query;$('viewMode').value=s.view.mode;options($('groupFilter'),s.groups,s.group);const profile=$('profile').value;options($('profile'),s.profiles.length?s.profiles:[{label:'暂无方案',value:''}],s.profiles.includes(profile)?profile:s.profiles[0]||'');
-  $('groupOrder').hidden=s.view.mode==='不分组';$('groupFolds').hidden=s.view.mode==='不分组';$('groupOrder').textContent=s.view.group_orders?.[s.view.mode]?.length?'手动排序 ↕':'组名 '+(s.view.group_descending?'↓':'↑');$('groupOrder').title='拖动分组行左侧把手调整顺序；点击此处恢复组名排序';$('groupOrder').setAttribute('aria-label','分组名称'+(s.view.group_descending?'倒序，点击改为正序':'正序，点击改为倒序'));document.querySelectorAll('[data-layout]').forEach(n=>{const active=n.dataset.layout===(s.view.layout||'table');n.classList.toggle('active',active);n.setAttribute('aria-pressed',String(active));});$('tableHeader').parentElement.classList.toggle('cover-layout',s.view.layout==='covers');$('hideOld').checked=s.view.hide_unavailable;$('showFolder').checked=s.view.show_folder;$('master').checked=s.master;$('master').parentElement.hidden=s.game!=='sts2';$('totalBadge').textContent=s.counts.total;$('totalBadge').title='当前模组包共占用 '+formatBytes(s.counts.disk_bytes);$('shownCaption').title='当前模组包共占用 '+formatBytes(s.counts.disk_bytes);$('shownCaption').textContent=`显示 ${s.counts.shown} / ${s.counts.total} · 缺失 ${s.inventory?.missing||0}`;renderInventory();$('libraryCaption').textContent=`Slay the Spire ${s.game==='sts1'?'I':'II'} · 本地模组`;
+  $('groupOrder').hidden=s.view.mode==='不分组';$('groupFolds').hidden=s.view.mode==='不分组';$('groupOrder').textContent=s.view.group_orders?.[s.view.mode]?.length?'手动排序 ↕':'组名 '+(s.view.group_descending?'↓':'↑');$('groupOrder').title='拖动分组行左侧把手调整顺序；点击此处恢复组名排序';$('groupOrder').setAttribute('aria-label','分组名称'+(s.view.group_descending?'倒序，点击改为正序':'正序，点击改为倒序'));document.querySelectorAll('[data-layout]').forEach(n=>{const active=n.dataset.layout===(s.view.layout||'table');n.classList.toggle('active',active);n.setAttribute('aria-pressed',String(active));});$('tableHeader').parentElement.classList.toggle('cover-layout',s.view.layout==='covers');$('localFilter').value=s.view.local_filter||'all';$('hideOld').checked=s.view.hide_unavailable;$('showFolder').checked=s.view.show_folder;$('master').checked=s.master;$('master').parentElement.hidden=s.game!=='sts2';$('totalBadge').textContent=s.counts.total;$('totalBadge').title='当前模组包共占用 '+formatBytes(s.counts.disk_bytes);$('shownCaption').title='当前模组包共占用 '+formatBytes(s.counts.disk_bytes);$('shownCaption').textContent=`显示 ${s.counts.shown} / ${s.counts.total}`+(s.counts.hidden?` · 隐藏旧副本 ${s.counts.hidden}`:'')+(s.inventory?.missing?` · 缺失 ${s.inventory.missing}`:'');renderInventory();$('libraryCaption').textContent=`Slay the Spire ${s.game==='sts1'?'I':'II'} · 模组清单`;
   $('status').textContent=s.warning?'Steam 工坊状态未同步 · 更多 → 扫描提示':s.dirty?`开启 ${s.counts.enabled} · ${s.counts.changed} 项开关待应用`:s.status+' · 开启 '+s.counts.enabled;$('status').title=s.warning||s.status;$('statusDot').classList.toggle('warning',!!s.warning||s.dirty);$('changeBadge').hidden=!s.counts.changed;$('changeBadge').textContent=s.counts.changed;
-  if(!themePending&&currentTheme!==s.theme)theme(s.theme);renderHeader();flatten();if(switched)$('viewport').scrollTop=gameViews.get(s.game)?.scroll||0;renderVirtual(true);selectionChanged();}
+  if(!themePending&&currentTheme!==s.theme)theme(s.theme);renderSubscriptionMode();renderHeader();flatten();if(switched)$('viewport').scrollTop=gameViews.get(s.game)?.scroll||0;renderVirtual(true);selectionChanged();}
 const columnDefs=[['enabled','开关'],['nickname','昵称'],['name','模组名称'],['version','版本'],['group','分组'],['tags','标签'],['folder','文件夹归属'],['source','来源'],['loader','状态']];let headerKey='';
 function visibleColumns(){return columnDefs.filter(([key])=>key!=='folder'||state.view.show_folder);}
-const columnMinimum={enabled:48,nickname:70,name:70,version:54,group:54,tags:60,folder:80,source:44,loader:76};
+const columnMinimum={enabled:48,nickname:70,name:70,version:54,group:54,tags:60,folder:80,source:60,loader:76};
 let columnDrag=null;
 function applyColumnWidths(widths){
   const columns=visibleColumns(),card=$('tableHeader').parentElement;
@@ -110,7 +116,7 @@ function beginColumnResize(event,index){
   handle.onpointercancel=()=>{if(columnDrag)applyColumnWidths(columnDrag.widths);columnDrag=null;document.body.classList.remove('resizing-columns');};
 }
 function renderHeader() {
-  const key=JSON.stringify([state.game,state.view.show_folder,state.view.sort_column,state.view.descending,state.view.column_widths]);if(key===headerKey)return;headerKey=key;
+  const key=JSON.stringify([state.game,state.view.show_folder,state.view.sort_column,state.view.descending,state.view.column_widths,state.subscription_mode]);if(key===headerKey)return;headerKey=key;
   const columns=visibleColumns();
   $('headerInner').replaceChildren(...columns.map(([key,label],index)=>{
     const on=state.view.sort_column===key,n=el('button',on?'sorted':'',label+(on?(state.view.descending?' ↓':' ↑'):''));n.dataset.column=key;
@@ -122,16 +128,25 @@ function renderHeader() {
   const card=$('tableHeader').parentElement;
   if(state.view.column_widths&&Object.keys(state.view.column_widths).length)applyColumnWidths(state.view.column_widths);
   else{
-    const template=state.view.show_folder?'52px minmax(85px,1.15fr) minmax(85px,1.1fr) 66px 65px minmax(75px,1fr) minmax(90px,1fr) 46px 82px':'52px minmax(95px,1.2fr) minmax(95px,1.1fr) 70px 72px minmax(88px,1.1fr) 46px 82px';
+    const template=state.view.show_folder?'52px minmax(85px,1.15fr) minmax(85px,1.1fr) 66px 65px minmax(75px,1fr) minmax(90px,1fr) 60px 82px':'52px minmax(95px,1.2fr) minmax(95px,1.1fr) 70px 72px minmax(88px,1.1fr) 60px 82px';
     card.style.setProperty('--columns',template);card.style.setProperty('--table-min',state.view.show_folder?'740px':'620px');
   }
 }
-function shortStatus(mod){if(mod.missing)return '缺失';if(mod.loader_status.startsWith('预计采用'))return '预计采用';if(mod.loadable)return '可配置';return mod.superseded?'已遮蔽':'需核对';}
+const steamStatusLabels={unknown:'订阅未确认',unsubscribed:'未订阅',subscribed:'已订阅待下载',downloading:'下载中',queued:'下载排队',installed:'已安装待扫描'};
+function shortStatus(mod){if(mod.missing)return steamStatusLabels[mod.subscription_status]||'缺失';if(mod.loader_status.startsWith('预计采用'))return '预计采用';if(mod.loadable)return '可配置';return mod.superseded?'已遮蔽':'需核对';}
 
 function flatten() {flat=[];const drag=listGesture?.kind==='group'&&listGesture.active?listGesture:null;const sections=drag?.previewSections||state.sections;if(sections.length){for(const section of sections){const id='g:'+state.view.mode+':'+section.key;if(drag&&section.key===drag.key){flat.push({id:'placeholder:'+id,type:'placeholder',keys:[],groupId:'',heightOverride:drag.sourceHeight});continue;}flat.push({id,type:'group',section,keys:section.members,groupId:id});if(!collapsed.has(id))for(const key of section.shown)flat.push({id:id+'|'+key,type:'mod',key,keys:[key],groupId:id});}}else for(const key of state.visible)flat.push({id:'m:'+key,type:'mod',key,keys:[key],groupId:''});rowById=new Map(flat.map((r,i)=>[r.id,{...r,index:i}]));flat=flat.map(r=>rowById.get(r.id));let top=0;for(const row of flat){row.top=top;row.height=row.heightOverride||(row.type==='group'?34:(state.view.layout==='covers'?128:42));top+=row.height;}$('spacer').style.height=top+'px';$('empty').hidden=!!flat.length;$('viewport').setAttribute('aria-rowcount',flat.length);}
 function controlState(keys) {const targets=keys.map(k=>mods.get(k)).filter(Boolean),available=targets.filter(m=>m.loadable),list=available.length?available:targets;const count=list.filter(m=>m.enabled).length;return count===list.length&&list.length?'on':count?'mixed':'off';}
-function switchButton(row) {const n=el('button','switch');n.dataset.action='toggle';n.dataset.state=controlState(row.keys);n.setAttribute('role','switch');n.setAttribute('aria-checked',n.dataset.state==='mixed'?'mixed':String(n.dataset.state==='on'));n.setAttribute('aria-label',row.type==='group'?'切换整个分组':'切换模组');n.title=row.type==='group'?'切换整个分组（含筛选隐藏的组员）':'切换模组';if(row.type==='mod'&&mods.get(row.key)?.missing){n.disabled=true;n.title='本地缺少文件，清单期望'+(mods.get(row.key).wanted_enabled?'开启':'关闭')+'；可打开创意工坊手动订阅，下载后更新列表。';}return n;}
-function fillRow(n,row) {n.dataset.row=row.id;n.setAttribute('role','row');if(row.type==='placeholder'){n.className='group-slot';n.style.height=row.height+'px';n.replaceChildren(el('span','group-slot-label','拖动分组至此'));return;}if(row.type==='group'){n.className='group-row'+(collapsed.has(row.id)?' collapsed':'');const expander=el('button','expander');expander.dataset.action='collapse';expander.append(icon('chevron'));expander.setAttribute('aria-label','展开或折叠分组');const grip=el('span','group-grip','⠿');grip.title='按住上下拖动分组';grip.setAttribute('aria-label','拖动分组排序');n.replaceChildren(grip,expander,switchButton(row),el('strong','',row.section.label),el('span','group-count',`${row.keys.length} 项 · 开启 ${row.keys.filter(k=>mods.get(k)?.enabled).length}`));}else if(state.view.layout==='covers'){fillCoverRow(n,row);}else{const m=mods.get(row.key);n.className='grid-row mod-row'+(m.changed?' changed':'')+(!m.loadable?' unavailable':'');const editing=n.querySelector('.alias-edit');const cells=[];const control=el('div','switch-cell');control.append(switchButton(row));cells.push(control);for(const [key] of columnDefs.slice(1)){if(key==='folder'&&!state.view.show_folder)continue;const text=key==='name'?m.name:key==='folder'?m.folder_label:key==='source'?(m.source==='steam_workshop'?'工坊':'本地'):key==='loader'?shortStatus(m):key==='nickname'?m.nickname:key==='tags'?'':m[key]||(key==='group'?'未分组':'—');const cell=el('div','cell '+(key==='name'?'modname':key==='loader'?'loader':key));cell.dataset.column=key;if(['version','group','tags'].includes(key))cell.dataset.manageable='true';cell.title=key==='tags'?m.tags.join('，'):key==='loader'?m.loader_status:text;if(key==='tags')for(const tag of m.tags)cell.append(el('span',tag==='缺失'?'tag-chip system-missing':'tag-chip',tag));else if(key==='nickname'&&editing)cell.append(editing);else {cell.textContent=text;if(key==='name'||key==='version'){const sub=key==='name'?(m.missing?'尚无本地文件':(m.game==='sts1'||state.game==='sts1'?'文件 ':'目录共 ')+formatBytes(m.disk_bytes)):compatibilityText(m)?'适用 '+compatibilityText(m):'';if(sub){const main=el('span','cell-main',text);cell.replaceChildren(main,el('small','cell-secondary',sub));cell.title=text+'\n'+sub;}}}cells.push(cell);}for(const cell of cells)if(cell.dataset.manageable)cell.title+='\n双击管理';n.replaceChildren(...cells);}n.classList.toggle('selected',row.type==='mod'?selected.has(row.key):row.keys.length>0&&row.keys.every(k=>selected.has(k)));}
+function switchButton(row) {if(state.subscription_mode){const keys=row.type==='group'?row.section.shown:row.keys,n=el('button','subscribe-pick'),count=keys.filter(k=>subscriptionPicked.has(k)).length;n.dataset.action='toggle';n.dataset.state=count===keys.length&&keys.length?'on':count?'mixed':'off';n.textContent=n.dataset.state==='on'?'✓':n.dataset.state==='mixed'?'−':'';n.setAttribute('role','checkbox');n.setAttribute('aria-checked',n.dataset.state==='mixed'?'mixed':String(n.dataset.state==='on'));n.title='勾选待订阅项目；不会立即订阅';return n;}const n=el('button','switch');n.dataset.action='toggle';n.dataset.state=controlState(row.keys);n.setAttribute('role','switch');n.setAttribute('aria-checked',n.dataset.state==='mixed'?'mixed':String(n.dataset.state==='on'));n.setAttribute('aria-label',row.type==='group'?'切换整个分组':'切换模组');n.title=row.type==='group'?'切换整个分组（含筛选隐藏的组员）':'切换模组';if(row.type==='mod'&&mods.get(row.key)?.missing){n.disabled=true;n.title='本地缺少文件，清单期望'+(mods.get(row.key).wanted_enabled?'开启':'关闭')+'；可打开创意工坊手动订阅，下载后更新列表。';}return n;}
+function fillRow(n,row) {n.dataset.row=row.id;n.setAttribute('role','row');if(row.type==='placeholder'){n.className='group-slot';n.style.height=row.height+'px';n.replaceChildren(el('span','group-slot-label','拖动分组至此'));return;}if(row.type==='group'){n.className='group-row'+(collapsed.has(row.id)?' collapsed':'');const expander=el('button','expander');expander.dataset.action='collapse';expander.append(icon('chevron'));expander.setAttribute('aria-label','展开或折叠分组');const grip=el('span','group-grip','⠿');grip.title='按住上下拖动分组';grip.setAttribute('aria-label','拖动分组排序');n.replaceChildren(grip,expander,switchButton(row),el('strong','',row.section.label),el('span','group-count',state.subscription_mode?`${row.keys.length} 项 · 已勾选 ${row.keys.filter(k=>subscriptionPicked.has(k)).length}`:`${row.keys.length} 项 · 开启 ${row.keys.filter(k=>mods.get(k)?.enabled).length}`));}else if(state.view.layout==='covers'){fillCoverRow(n,row);}else{const m=mods.get(row.key);n.className='grid-row mod-row'+(m.changed?' changed':'')+(!m.loadable?' unavailable':'');const editing=n.querySelector('.alias-edit');const cells=[];const control=el('div','switch-cell');control.append(switchButton(row));cells.push(control);for(const [key] of columnDefs.slice(1)){if(key==='folder'&&!state.view.show_folder)continue;const text=key==='name'?m.name:key==='folder'?m.folder_label:key==='source'?(m.source==='steam_workshop'?'工坊':'本地'):key==='loader'?shortStatus(m):key==='nickname'?m.nickname:key==='tags'?'':m[key]||(key==='group'?'未分组':'—');const cell=el('div','cell '+(key==='name'?'modname':key==='loader'?'loader':key));cell.dataset.column=key;if(['version','group','tags'].includes(key))cell.dataset.manageable='true';cell.title=key==='source'?(text+(m.collections?.length?'\n来自合集：'+m.collections.map(c=>c.title+' ['+c.id+']').join('、'):'')):key==='tags'?m.tags.join('，'):key==='loader'?m.loader_status:text;if(key==='tags')for(const tag of m.tags)cell.append(el('span',tag==='缺失'?'tag-chip system-missing':'tag-chip',tag));else if(key==='nickname'&&editing)cell.append(editing);else {cell.textContent=text;if(key==='name'||key==='version'){const sub=key==='name'?(m.missing?'尚无本地文件':(m.game==='sts1'||state.game==='sts1'?'文件 ':'目录共 ')+formatBytes(m.disk_bytes)):compatibilityText(m)?'适用 '+compatibilityText(m):'';if(sub){const main=el('span','cell-main',text);cell.replaceChildren(main,el('small','cell-secondary',sub));cell.title=text+'\n'+sub;}}}if(key==='source'){
+  const action=m.source==='steam_workshop'&&m.workshop_id?'open_workshop':
+    m.source==='mods_directory'&&!m.missing?'open_local_source':'';
+  if(action){
+    cell.dataset.sourceLink=action;
+    cell.append(icon('link'));
+    cell.title+='\n'+(action==='open_workshop'?'双击打开创意工坊':'双击在文件资源管理器中定位');
+  }
+}cells.push(cell);}for(const cell of cells)if(cell.dataset.manageable)cell.title+='\n双击管理';n.replaceChildren(...cells);}n.classList.toggle('selected',row.type==='mod'?selected.has(row.key):row.keys.length>0&&row.keys.every(k=>selected.has(k)));}
 const coverImages=new Map();
 function coverError(message,code){return Object.assign(Error(message),{code});}
 function cachedCover(game,id){
@@ -229,29 +244,121 @@ new ResizeObserver(()=>{if(!scrollFrame)scrollFrame=requestAnimationFrame(()=>re
 $('viewport').addEventListener('scroll',()=>{if(!scrollFrame)scrollFrame=requestAnimationFrame(()=>renderVirtual());},{passive:true});
 function selectionChanged() {$('selectedCount').textContent=selected.size+' 项';for(const n of $('rows').children){const row=rowById.get(n.dataset.row);if(row){n.classList.toggle('selected',row.type==='mod'?selected.has(row.key):row.keys.length>0&&row.keys.every(k=>selected.has(k)));n.classList.toggle('focus-item',row.type==='mod'&&row.id===lastRow);}}updateControls();}
 function choose(row,event) {if(event.shiftKey&&anchor>=0){if(!event.ctrlKey)selected.clear();for(const r of flat.slice(Math.min(anchor,row.index),Math.max(anchor,row.index)+1))if(r.type==='mod')selected.add(r.key);}else if(event.ctrlKey||event.metaKey){const remove=row.keys.every(k=>selected.has(k));for(const key of row.keys)remove?selected.delete(key):selected.add(key);anchor=row.index;}else{selected=new Set(row.keys);anchor=row.index;}focusRow=row.id;lastRow=row.id;selectionChanged();$('viewport').focus({preventScroll:true});}
-$('rows').addEventListener('click',event=>{if(suppressGroupClick)return;const n=event.target.closest('[data-row]');if(!n||event.target.closest('input'))return;const row=rowById.get(n.dataset.row);if(!row)return;const action=event.target.closest('[data-action]')?.dataset.action;if(action==='collapse'){collapsed.has(row.id)?collapsed.delete(row.id):collapsed.add(row.id);flatten();renderVirtual(true);return;}choose(row,event);if(action==='toggle')fire('toggle',{keys:row.keys});});
-$('rows').addEventListener('dblclick',event=>{const groupNode=event.target.closest('.group-row');if(groupNode&&state.view.mode==='自定义分组'&&!event.target.closest('button,.group-grip')){const group=rowById.get(groupNode.dataset.row);if(group?.section.key){renameCustomGroup(group.section.key);}return;}const property=event.target.closest('[data-column]'),owner=event.target.closest('[data-row]'),item=owner&&rowById.get(owner.dataset.row);if(item?.type==='mod'&&['version','group','tags'].includes(property?.dataset.column)){choose(item,{});if(property.dataset.column==='version')fire('details',{key:item.key}).then(r=>{if(r)showVersions(r.versions);});else $(property.dataset.column==='group'?'setGroup':'manageTags').click();return;}const cell=event.target.closest('[data-column="nickname"]'),n=event.target.closest('[data-row]');if(!cell||!n||cell.querySelector('input'))return;const row=rowById.get(n.dataset.row);if(!row||row.type!=='mod')return;const m=mods.get(row.key),box=input(m.nickname);box.className='alias-edit';let finished=false;const finish=save=>{if(finished)return;finished=true;document.removeEventListener('pointerdown',outside,true);const value=box.value;const owner=box.parentElement;if(owner)owner.textContent=save?(value.trim()||m.name):m.nickname;if(save)fire('alias',{keys:[row.key],value});};const outside=e=>{if(!box.contains(e.target))finish(true);};document.addEventListener('pointerdown',outside,true);cell.replaceChildren(box);box.focus();box.select();box.addEventListener('click',e=>e.stopPropagation());box.onkeydown=e=>{if(e.isComposing||e.keyCode===229)return;if(e.key==='Enter'){e.preventDefault();finish(true);}if(e.key==='Escape'){e.preventDefault();finish(false);}};// Save only when a pointer press starts outside, never on a selection drag release.
+$('rows').addEventListener('click',event=>{if(suppressGroupClick)return;const n=event.target.closest('[data-row]');if(!n||event.target.closest('input'))return;const row=rowById.get(n.dataset.row);if(!row)return;const action=event.target.closest('[data-action]')?.dataset.action;if(action==='collapse'){collapsed.has(row.id)?collapsed.delete(row.id):collapsed.add(row.id);flatten();renderVirtual(true);return;}choose(row,event);if(action==='toggle'){if(state.subscription_mode)pickSubscriptions(row.type==='group'?row.section.shown:row.keys);else fire('toggle',{keys:row.keys});}});
+$('rows').addEventListener('dblclick',event=>{const groupNode=event.target.closest('.group-row');if(groupNode&&state.view.mode==='自定义分组'&&!event.target.closest('button,.group-grip')){const group=rowById.get(groupNode.dataset.row);if(group?.section.key){renameCustomGroup(group.section.key);}return;}const property=event.target.closest('[data-column]'),owner=event.target.closest('[data-row]'),item=owner&&rowById.get(owner.dataset.row);
+if(item?.type==='mod'&&property?.dataset.sourceLink){
+  fire(property.dataset.sourceLink,{key:item.key});
+  return;
+}
+if(item?.type==='mod'&&['name','version','group','tags'].includes(property?.dataset.column)){choose(item,{});if(property.dataset.column==='name')$('details').click();else if(property.dataset.column==='version')fire('details',{key:item.key}).then(r=>{if(r)showVersions(r.versions,r);});else $(property.dataset.column==='group'?'setGroup':'manageTags').click();return;}const cell=event.target.closest('[data-column="nickname"]'),n=event.target.closest('[data-row]');if(!cell||!n||cell.querySelector('input'))return;const row=rowById.get(n.dataset.row);if(!row||row.type!=='mod')return;const m=mods.get(row.key),box=input(m.nickname);box.className='alias-edit';let finished=false;const finish=save=>{if(finished)return;finished=true;document.removeEventListener('pointerdown',outside,true);const value=box.value;const owner=box.parentElement;if(owner)owner.textContent=save?(value.trim()||m.name):m.nickname;if(save)fire('alias',{keys:[row.key],value});};const outside=e=>{if(!box.contains(e.target))finish(true);};document.addEventListener('pointerdown',outside,true);cell.replaceChildren(box);box.focus();box.select();box.addEventListener('click',e=>e.stopPropagation());box.onkeydown=e=>{if(e.isComposing||e.keyCode===229)return;if(e.key==='Enter'){e.preventDefault();finish(true);}if(e.key==='Escape'){e.preventDefault();finish(false);}};// Save only when a pointer press starts outside, never on a selection drag release.
 });
 
 document.querySelectorAll('[data-game]').forEach(n=>n.onclick=async()=>{if(n.dataset.game===state?.game)return;fire('game',{game:n.dataset.game},true);});
 async function cacheSettings(first=false){const body=el('div'),enabled=checkbox('更新列表时为新版本保存文件缓存（额外占用大量磁盘）',!!state.backup_cache_enabled);body.append(note('更新只增量补充或更新模组信息，不会主动删除已下架、取消订阅的模组文件，也不会替你取消订阅。Steam 自己已经移除的文件，需要从备份取回。'),enabled.node,note('缓存可导出成备份包上传网盘，之后仅下载所需的一包即可取回文件。此选择会记住；以后可在右上角“更新与备份设置”修改。'));if(await dialog(first?'首次更新：选择是否缓存旧版':'更新与备份设置',body,[{label:'取消',value:false},{label:first?'记住并更新':'保存设置',value:true,primary:true}],true)!==true)return false;await fire('cache_options',{enabled:enabled.box.checked});return true;}
 $('cacheSettings').onclick=()=>cacheSettings();
-$('smallRefresh').onclick=async()=>{await fire('refresh_small');showProgress();};
-$('scan').onclick=async()=>{if(!state.backup_cache_configured&&!await cacheSettings(true))return;if(await discard()){await fire('scan',{discard:true},true);showProgress();}};
+function metadataRefreshOnly(s){return s.demo_mode||(!s.ready&&s.mods.some(m=>m.workshop_id));}
+async function runRefresh(action,parts,scope='changed'){
+  if(parts.includes('local')){
+    if(!state.backup_cache_configured&&!await cacheSettings(true))return;
+    if(!await discard())return;
+  }
+  try{await act(action,{parts,scope,discard:parts.includes('local')},true);showProgress();}catch(e){toast(e.message,true);}
+}
+async function chooseRefresh(){
+  const metadataOnly=metadataRefreshOnly(state),body=el('div'),choices=[
+    ['local',checkbox('本地文件',!metadataOnly)],
+    ['titles',checkbox('创意工坊名称',true)],
+    ['covers',checkbox('创意工坊封面',true)],
+  ];
+  choices[0][1].box.disabled=metadataOnly;
+  const all=checkbox('检查清单中所有工坊项目',metadataOnly);
+  body.append(note('勾选本次要更新的项目。只更新工坊资料时，不扫描磁盘、不生成备份，也不影响开关草稿。'));
+  for(const [,choice] of choices)body.append(choice.node);
+  if(metadataOnly)body.append(note('当前没有可扫描的游戏目录，仍可更新清单里的工坊资料。'));
+  body.append(all.node,note('默认只处理新增、文件有变化或上次未完成的工坊项目。「全部更新」会执行所有可用项目，并检查清单内所有工坊模组。封面需要启用 Steam 账号 API。'));
+  const result=dialog('选择更新项目',body,[
+    {label:'取消',value:'cancel'},
+    {label:'全部更新',value:'all'},
+    {label:'更新所选项目',value:'selected',primary:true},
+  ]);
+  const sync=()=>{
+    const selected=choices.filter(([,choice])=>choice.box.checked).map(([part])=>part);
+    all.box.disabled=!selected.some(part=>part!=='local');
+    $('dialogButtons').querySelector('.primary').disabled=!selected.length;
+  };
+  for(const [,choice] of choices)choice.box.addEventListener('change',sync);
+  sync();
+  const action=await result;
+  if(action==='all'){
+    await runRefresh('refresh_selected',choices.filter(([,choice])=>!choice.box.disabled).map(([part])=>part),'all');
+  }else if(action==='selected'){
+    await runRefresh('refresh_selected',choices.filter(([,choice])=>choice.box.checked).map(([part])=>part),all.box.checked?'all':'changed');
+  }
+}
+$('chooseRefresh').onclick=chooseRefresh;
+$('scan').onclick=()=>metadataRefreshOnly(state)?runRefresh('refresh_small',['titles','covers']):runRefresh('scan',['local','titles','covers']);
 $('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{$('viewport').scrollTop=0;fire('view',{query:$('search').value});},100);});
 document.querySelectorAll('[data-layout]').forEach(n=>n.onclick=()=>{if(n.dataset.layout===(state?.view.layout||'table'))return;$('viewport').scrollTop=0;fire('view',{layout:n.dataset.layout});});
 async function coverOptions(){const refresh=checkbox('重新获取已缓存的封面（默认只补齐缺失项）'),body=el('div');body.append(note('按当前游戏的工坊编号下载封面，同目录模组共用图片。图片保存在本地，停止后保留已完成部分。'),refresh.node);if(await dialog('下载工坊封面',body,[{label:'取消',value:false},{label:'开始获取',value:true,primary:true}])===true){await fire('covers_start',{refresh:refresh.box.checked});showProgress();}};
 $('groupOrder').onclick=()=>fire('view',{group_order:[],group_descending:state.view.group_orders?.[state.view.mode]?.length?false:!state.view.group_descending});
-$('viewMode').onchange=()=>{$('viewport').scrollTop=0;fire('view',{mode:$('viewMode').value});};$('groupFilter').onchange=()=>fire('view',{group:$('groupFilter').value});$('hideOld').onchange=()=>fire('view',{hide_unavailable:$('hideOld').checked});$('showFolder').onchange=()=>fire('view',{show_folder:$('showFolder').checked});
-$('filterOn').onclick=()=>fire('toggle',{keys:state.visible,value:true});$('filterOff').onclick=()=>fire('toggle',{keys:state.visible,value:false});$('master').onchange=()=>fire('master',{value:$('master').checked});
+$('localFilter').onchange=()=>fire('view',{local_filter:$('localFilter').value});$('viewMode').onchange=()=>{$('viewport').scrollTop=0;fire('view',{mode:$('viewMode').value});};$('groupFilter').onchange=()=>fire('view',{group:$('groupFilter').value});$('hideOld').onchange=()=>fire('view',{hide_unavailable:$('hideOld').checked});$('showFolder').onchange=()=>fire('view',{show_folder:$('showFolder').checked});
+$('filterOn').onclick=()=>state.subscription_mode?pickSubscriptions(state.visible,true):fire('toggle',{keys:state.visible,value:true});$('filterOff').onclick=()=>state.subscription_mode?pickSubscriptions(state.visible,false):fire('toggle',{keys:state.visible,value:false});$('master').onchange=()=>fire('master',{value:$('master').checked});
 $('theme').onchange=async()=>{themePending=true;const value=$('theme').value;theme(value);try{await act('theme',{value,dark:document.documentElement.dataset.colorTheme==='dark'});}catch(e){toast(e.message,true);}finally{themePending=false;}};
 $('addTag').onclick=()=>{if(selected.size&&$('quickTag').value.trim())fire('tags_add',{keys:[...selected],value:$('quickTag').value});};$('quickTag').onkeydown=e=>{if(e.key==='Enter')$('addTag').click();};
 $('setGroup').onclick=async()=>{const keys=[...selected],box=input(mods.get(keys[0])?.group||''),existing=el('select'),body=el('div');options(existing,[{label:'选择已有分组…',value:''},...[...new Set(state.mods.map(m=>m.group).filter(Boolean))].sort().map(g=>({label:g,value:g}))],'');existing.onchange=()=>{if(existing.value)box.value=existing.value;};body.append(field('已有分组',existing),field('分组名称（也可输入新名称，留空清除）',box));box.onkeydown=e=>{if(e.key==='Enter'&&!e.isComposing){e.preventDefault();finishDialog(true);}};const yes=await dialog('设置分组',body,[{label:'取消',value:false},{label:'保存',value:true,primary:true}]);if(yes===true)fire('group',{keys,value:box.value});};
 $('saveProfile').onclick=async()=>{const name=await promptText('保存开关方案','方案名称',$('profile').value);if(!name?.trim())return;const overwrite=state.profiles.includes(name.trim());if(overwrite&&!await confirm('覆盖同名方案“'+name.trim()+'”？'))return;await fire('profile_save',{name:name.trim(),overwrite});$('profile').value=name.trim();};
 $('restoreProfile').onclick=()=>fire('profile_restore',{name:$('profile').value});$('deleteProfile').onclick=async()=>{if($('profile').value&&await confirm('删除方案“'+$('profile').value+'”？'))fire('profile_delete',{name:$('profile').value});};
 $('profile').onchange=updateControls;$('undo').onclick=()=>fire('undo');$('redo').onclick=()=>fire('redo');
-$('dependencies').onclick=async()=>{const r=await fire('dependencies');if(!r)return;dialog('本地依赖检查',`已勾选 ${r.added} 个本地依赖，点击应用后生效。\n\n`+(r.missing.length?'缺少以下依赖，请自行下载：\n'+r.missing.join('\n')+'\n\n':'')+(r.ambiguous.length?'无法自动选择副本：\n'+r.ambiguous.join('\n')+'\n\n':'')+r.issues.join('\n'));};
-$('details').onclick=async()=>{if(!selected.size)return;const r=await fire('details',{key:[...selected][0]});if(!r)return;const m=r.mod,body=el('div'),dl=el('dl','details-grid');const fields=[['昵称',m.nickname],['模组名称',m.name],['版本',m.version],['本地占用',formatBytes(m.disk_bytes)+(state.game==='sts1'?'（JAR 文件）':'（清单所在目录共用）')],['完整包占用',formatBytes(m.package_bytes)],['适用版本（作者声明）',Object.keys(m.compatibility||{}).length?JSON.stringify(m.compatibility):'未声明，不能据此保证兼容'],['作者',m.authors],['工坊状态',r.workshop_health?.status==='存疑'?'存疑（已下架为约定标签，并非确认；下次扫描仅复查一次）':r.workshop_health?.status||'未记录'],['模组 ID',m.id],['文件名',m.path.split(/[\\/]/).pop()],['完整路径',m.path],['文件夹归属',m.folder_label],['自定义分组',m.group||'未分组'],['标签',m.tags.join('，')||'无'],['加载状态',m.loader_status],['依赖',JSON.stringify(m.dependencies,null,2)]];for(const [label,value] of fields)dl.append(el('dt','',label),el('dd','',value));body.append(dl);const copies=el('details'),summary=el('summary','',`同 ID 的所有文件（${r.copies.length} 份，含隐藏副本）`);copies.append(summary,...r.copies.map(c=>el('pre','',`${c.version} · ${c.enabled?'开启':'关闭'} · ${c.folder_label}\n${c.path}\n${c.loader_status}`)));body.append(copies);const historyButton=el('button','',`版本与备份记录（${r.versions.length} 条）`);historyButton.onclick=()=>showVersions(r.versions);body.append(historyButton);dialog('详细信息',body,[{label:'关闭',value:'close'}],true);};
+$('dependencies').onclick=showDependencyReport;
+
+async function showDependencyReport(){
+ const game=state.game;
+ const report=await fire('dependencies');
+ if(!report)return;
+ const missing=report.rows.filter(row=>row.status==='missing');
+ const ids=[...new Set(missing.map(row=>row.workshop_id).filter(id=>/^\d+$/.test(id)))];
+ let lookup=null;
+ if(ids.length){
+   dialog('正在核对工坊前置',note('正在读取缺失前置的工坊信息。'),[{label:'收起',value:'close'}]);
+   try{lookup=await window.pywebview.api.dependency_lookup(ids);}
+   catch(e){lookup={ok:false,error:e.message};}
+   if(state.game!==game)return;
+ }
+ const body=el('div');
+ body.append(note(`检查了 ${report.enabled} 个已开启模组及其前置。补开 ${report.added} 项，预览并应用后生效。`));
+ if(!report.rows.length)body.append(note('已开启模组没有声明前置。'));
+ if(report.rows.length&&report.rows.every(row=>['enabled_now','satisfied'].includes(row.status)))body.append(note('已声明的前置均已满足。'));
+ const labels={satisfied:'已满足',enabled_now:'已补开',review:'需核对版本或副本',missing:'本地缺失'};
+ for(const row of report.rows){
+   const known=lookup?.items?.[row.workshop_id];
+   const name=known?.title||row.name||row.workshop_id||row.id;
+   const line=el('div','version-entry');
+   line.append(el('strong','',name+' · '+labels[row.status]));
+   line.append(note('由 '+row.required_by+' 要求'+(row.min_version?' · 最低版本 '+row.min_version:'')));
+   if(row.status==='missing'){
+     const hasId=/^\d+$/.test(row.workshop_id);
+     const detail=known?'已找到工坊项目 '+row.workshop_id:
+       !hasId?'未找到可确认的工坊编号':
+       !lookup?.ok||lookup?.errors?.[row.workshop_id]?'工坊查询失败，请稍后重试':
+       'Steam 未返回可用的前置信息';
+     line.append(note(detail));
+     const open=el('button','',hasId?'打开工坊页面':'搜索创意工坊');
+     open.onclick=()=>fire('dependency_page',{id:row.workshop_id,query:row.name||row.id});
+     line.append(open);
+   }
+   body.append(line);
+ }
+ const actions=[{label:'关闭',value:'close'}];
+ if(game==='sts2'&&!state.demo_mode&&lookup?.ok&&Object.keys(lookup.items).length){
+   actions.push({label:'加入清单并预览订阅',value:'subscribe',primary:true});
+ }
+ if(await dialog('前置检查结果',body,actions,true)==='subscribe'){
+   const keys=await fire('dependency_add',{token:lookup.token});
+   if(keys?.length)await showSubscribe(keys);
+ }
+}
+
+$('details').onclick=async()=>{if(!selected.size)return;const r=await fire('details',{key:[...selected][0]});if(!r)return;const m=r.mod,body=el('div'),dl=el('dl','details-grid');const fields=[['昵称',m.nickname],['模组名称',m.name],['版本',m.version],['本地占用',formatBytes(m.disk_bytes)+(state.game==='sts1'?'（JAR 文件）':'（清单所在目录共用）')],['完整包占用',formatBytes(m.package_bytes)],['适用版本（作者声明）',Object.keys(m.compatibility||{}).length?JSON.stringify(m.compatibility):'未声明，不能据此保证兼容'],['作者',m.authors],['工坊状态',r.workshop_health?.status==='存疑'?'存疑（已下架为约定标签，并非确认；下次扫描仅复查一次）':r.workshop_health?.status||'未记录'],['模组 ID',m.id],['文件名',m.path.split(/[\\/]/).pop()],['完整路径',m.path],['文件夹归属',m.folder_label],['合集来源',(m.collections||[]).map(c=>c.title+' ['+c.id+']').join('，')||'无'],['自定义分组',m.group||'未分组'],['标签',m.tags.join('，')||'无'],['加载状态',m.loader_status],['依赖',JSON.stringify(m.dependencies,null,2)]];for(const [label,value] of fields)dl.append(el('dt','',label),el('dd','',value));body.append(dl);const copies=el('details'),summary=el('summary','',`同 ID 的所有文件（${r.copies.length} 份，含隐藏副本）`);copies.append(summary,...r.copies.map(c=>el('pre','',`${c.version} · ${c.enabled?'开启':'关闭'} · ${c.folder_label}\n${c.path}\n${c.loader_status}`)));body.append(copies);const historyButton=el('button','',`版本与备份记录（${r.versions.length} 条）`);historyButton.onclick=()=>showVersions(r.versions,r);body.append(historyButton);dialog('详细信息',body,[{label:'关闭',value:'close'}],true);};
 $('workshop').onclick=()=>selected.size&&fire('open_workshop',{key:[...selected][0]});
 
 $('apply').onclick=async()=>{const p=await fire('apply_preview',{},true);if(!p)return;const yes=await dialog('应用前预览',p.text,[{label:'取消',value:false},{label:'确认应用',value:true,primary:true}],true);if(yes===true){const r=await fire('apply_commit',{token:p.token},true);if(r)dialog('已应用',`下次启动生效。\n\n配置回退文件（仅开关设置）：\n${r.backup}`+(r.receipt?'\n\n工坊开关记录：\n'+r.receipt:''));}};
@@ -263,7 +370,7 @@ $('settings').onclick=settings;
 async function account() {const r=await fire('account_info');if(!r)return;const body=el('div'),method=el('select');options(method,[{label:'账号 API（每批最多 50 项，无固定等待）',value:'account_api'},{label:'匿名简体中文网页',value:'web_schinese'}],r.method);const key=input('','password'),remember=checkbox('在本机加密保存 Key',r.saved),replace=el('button','','输入 / 替换 Key'),guide=el('button','','查看使用与安全说明'),forget=el('button','danger','清除本机及本次会话的 Key');key.autocomplete='new-password';key.disabled=!!(r.saved||r.session);key.placeholder=key.disabled?'已设置；不会显示原 Key':'粘贴新的 32 位 Key';replace.onclick=()=>{key.disabled=false;key.value='';key.placeholder='输入新的 Key，原 Key 不会回填';key.focus();};guide.onclick=()=>apiIntro(true);forget.onclick=async()=>{const result=await act('account_forget').catch(e=>{toast(e.message,true);return false;});if(result===false)return;key.value='';finishDialog();toast('本机文件与本次会话 Key 已清除；如需撤销 Key，请到 Steam 官方页面操作。');};body.append(note(r.saved?'当前状态：本机已有加密 Key。界面不提供查看或复制原 Key。':r.session?'当前状态：仅本次会话已设置 Key，退出后不保留。':'当前状态：尚未设置 Key，可稍后配置。'),field('信息获取方式',method),field('新的 Steam Web API Key',key),replace,remember.node,note('Key 不写入日志或备份包。清除本机记录不等于撤销 Steam 官方 Key；需要撤销时请查看说明中的官方入口。'),guide,forget);const yes=await dialog('Steam API 管理',body,[{label:'取消',value:false},{label:'保存设置',value:true,primary:true}],true);if(yes===true){const value=key.value;key.value='';await act('account_save',{method:method.value,key:value,remember:remember.box.checked}).then(()=>toast('API 设置已保存')).catch(e=>toast(e.message,true));}key.value='';}
 $('apiSettings').onclick=account;
 async function titleOptions(){const body=el('div'),resume=checkbox('从断点继续（取消则全部重查）',true),overwrite=checkbox('全部替换，包括手动修改的昵称');body.append(note('逐项保存标题和昵称。超时或限流时等待重试；停止后保留已完成部分。未勾选“全部替换”时保留手动昵称。'),resume.node,overwrite.node);if(await dialog('批量更新昵称',body,[{label:'取消',value:false},{label:'开始更新',value:true,primary:true}])===true){await fire('titles_start',{resume:resume.box.checked,overwrite:overwrite.box.checked});showProgress();}};
-function updateJob() {renderInventory();if(job.kind){$('status').textContent=job.summary;$('status').title=job.summary;}if(currentDialog==='job'){$('jobSummary').textContent=job.summary;$('jobProgress').max=Math.max(1,job.total||1);$('jobProgress').value=job.done||0;const log=$('jobLog'),pinned=log.scrollHeight-log.scrollTop-log.clientHeight<35;if(log.dataset.history!=='true'&&log.dataset.version!==String(job.version)){renderTaskLog(log,job.user_log,(job.lines||[]).join('\n'));if($('jobRawLog'))$('jobRawLog').textContent=(job.lines||[]).join('\n');log.dataset.version=String(job.version);if(pinned)log.scrollTop=log.scrollHeight;}if(job.next==='versions'&&!job.running)$('dialogButtons').lastElementChild.textContent='查看版本记录';const stop=$('dialogButtons').querySelector('[data-stop]');if(stop)stop.disabled=!job.running||!['titles','covers','scan'].includes(job.kind);}updateControls();}
+function updateJob() {renderInventory();if(job.kind){$('status').textContent=job.summary;$('status').title=job.summary;}if(currentDialog==='job'){$('jobSummary').textContent=job.summary;$('jobProgress').max=Math.max(1,job.total||1);$('jobProgress').value=job.done||0;const log=$('jobLog'),pinned=log.scrollHeight-log.scrollTop-log.clientHeight<35;if(log.dataset.history!=='true'&&log.dataset.version!==String(job.version)){renderTaskLog(log,job.user_log,(job.lines||[]).join('\n'));if($('jobRawLog'))$('jobRawLog').textContent=(job.lines||[]).join('\n');log.dataset.version=String(job.version);if(pinned)log.scrollTop=log.scrollHeight;}if(job.next==='versions'&&!job.running)$('dialogButtons').lastElementChild.textContent='查看版本记录';const stop=$('dialogButtons').querySelector('[data-stop]');if(stop)stop.disabled=!job.running||!['titles','covers','scan','subscribe'].includes(job.kind);}updateControls();}
 async function showProgress() {const r=await fire('logs');if(!r)return;const body=el('div'),summary=el('div','job-summary'),bar=el('progress'),log=el('div','job-log'),source=el('select'),issues=el('details'),head=el('summary','',`检查提示 · ${r.issues.length} 项`);summary.id='jobSummary';bar.id='jobProgress';log.id='jobLog';summary.textContent=job.kind?job.summary:r.user_log?.rows?.length?'最近任务记录':'暂无后台任务';log.dataset.history=String(!job.kind);renderTaskLog(log,r.user_log,r.text);issues.hidden=!r.issues.length;issues.append(head,el('pre','',r.issues.join('\n\n')||'没有发现问题。'));options(source,[{label:'当前 / 最近任务',value:''},...r.files.map(f=>({label:f.date+' · '+f.name,value:f.name}))],'');source.onchange=async()=>{log.dataset.history=String(!!source.value);if(source.value){const data=await fire('log_read',{name:source.value});if(data){renderTaskLog(log,data.user_log,data.text);$('jobRawLog').textContent=data.text;}}else{log.dataset.history=String(!job.kind);renderTaskLog(log,job.kind?job.user_log:r.user_log,(job.lines||[]).join('\n')||r.text);log.dataset.version='';updateJob();}};const raw=el('details'),rawHead=el('summary','','详细记录（排查用）'),rawText=el('pre','job-log',r.text);rawText.id='jobRawLog';raw.append(rawHead,rawText);body.append(summary,bar,log,field('日志记录',source),issues,raw);const promise=dialog('日志与检查',body,[{label:'导出当前任务日志',value:'export'},{label:'停止任务',value:'stop'},{label:job.running?'收起，后台继续':'关闭',value:'close',primary:true}],true,'job');$('dialogButtons').children[1].dataset.stop='true';updateJob();const result=await promise;if(result==='close'&&job.next==='versions'&&!job.running){allVersions();return;}if(result==='stop'){await fire('job_stop');showProgress();}if(result==='export'){await exportFile('log');showProgress();}}
 $('progress').onclick=showProgress;
 async function exportFile(kind) {try{const path=await pick(kind);if(path){if(['backup','release_export','release_import','release_import_folder'].includes(kind))showProgress();else toast('已保存：'+path);}}catch(e){toast(e.message,true);}}
@@ -271,18 +378,54 @@ $('export').onclick=showModLists;
 
 function closeMenus() {$('moreMenu').hidden=true;$('displayMenu').hidden=true;}
 $('more').onclick=e=>{e.stopPropagation();const show=$('moreMenu').hidden;closeMenus();$('moreMenu').hidden=!show;};$('display').onclick=e=>{e.stopPropagation();const show=$('displayMenu').hidden;closeMenus();$('displayMenu').hidden=!show;};$('moreMenu').addEventListener('click',e=>{if(e.target.closest('button'))closeMenus();});document.addEventListener('click',e=>{if(!e.target.closest('.popover'))closeMenus();});
-document.addEventListener('keydown',event=>{const editing=event.target instanceof Element&&event.target.closest('input,textarea,select,[contenteditable=true]');if(editing)return;if(event.key==='Escape'){closeMenus();return;}if($('dialog').open)return;const mod=event.ctrlKey||event.metaKey;if((event.key==='ArrowDown'||event.key==='ArrowUp')&&(event.target===$('viewport')||lastRow&&!event.target.closest('button,a,[role=button]'))){event.preventDefault();const items=flat.filter(r=>r.type==='mod'),index=items.findIndex(r=>r.id===(lastRow||focusRow)),step=event.key==='ArrowDown'?1:-1;const row=items[Math.max(0,Math.min(items.length-1,index<0?(step>0?0:items.length-1):index+step))];if(row){choose(row,event);const v=$('viewport');if(row.top<v.scrollTop)v.scrollTop=row.top;else if(row.top+row.height>v.scrollTop+v.clientHeight)v.scrollTop=row.top+row.height-v.clientHeight;renderVirtual();}return;}if(mod&&event.key.toLowerCase()==='a'){event.preventDefault();const row=rowById.get(focusRow),group=row?.groupId?rowById.get(row.groupId):row?.type==='group'?row:null;selected=new Set(group?.section?.shown||state?.visible||[]);selectionChanged();}else if(mod&&event.key.toLowerCase()==='z'){event.preventDefault();fire(event.shiftKey?'redo':'undo');}else if(event.code==='Space'&&event.target.tagName!=='BUTTON'&&selected.size){event.preventDefault();fire('toggle',{keys:[...selected]});}else if(event.key==='/'){event.preventDefault();$('search').focus();}});
+document.addEventListener('keydown',event=>{const editing=event.target instanceof Element&&event.target.closest('input,textarea,select,[contenteditable=true]');if(editing)return;if(event.key==='Escape'){closeMenus();return;}if($('dialog').open)return;const mod=event.ctrlKey||event.metaKey;if((event.key==='ArrowDown'||event.key==='ArrowUp')&&(event.target===$('viewport')||lastRow&&!event.target.closest('button,a,[role=button]'))){event.preventDefault();const items=flat.filter(r=>r.type==='mod'),index=items.findIndex(r=>r.id===(lastRow||focusRow)),step=event.key==='ArrowDown'?1:-1;const row=items[Math.max(0,Math.min(items.length-1,index<0?(step>0?0:items.length-1):index+step))];if(row){choose(row,event);const v=$('viewport');if(row.top<v.scrollTop)v.scrollTop=row.top;else if(row.top+row.height>v.scrollTop+v.clientHeight)v.scrollTop=row.top+row.height-v.clientHeight;renderVirtual();}return;}if(mod&&event.key.toLowerCase()==='a'){event.preventDefault();const row=rowById.get(focusRow),group=row?.groupId?rowById.get(row.groupId):row?.type==='group'?row:null;selected=new Set(group?.section?.shown||state?.visible||[]);selectionChanged();}else if(mod&&event.key.toLowerCase()==='z'){event.preventDefault();if(!state.subscription_mode)fire(event.shiftKey?'redo':'undo');}else if(event.code==='Space'&&event.target.tagName!=='BUTTON'&&selected.size){event.preventDefault();if(state.subscription_mode)pickSubscriptions([...selected]);else fire('toggle',{keys:[...selected]});}else if(event.key==='/'){event.preventDefault();$('search').focus();}});
 window.requestClose=async()=>{if(closePending)return;closePending=true;try{if(job.running&&job.kind==='backup'){toast('备份进行中，请等待完成后退出。');return;}if(job.running&&!await confirm('停止后台获取任务并退出？已完成的结果会保留。','后台任务进行中'))return;if(state?.dirty_games?.length&&!await confirm('退出将放弃'+state.dirty_games.map(g=>g==='sts1'?'塔一':'塔二').join('、')+'未应用的开关修改。已保存的昵称、标签和分组会保留。','有未应用的修改'))return;let r=await window.pywebview.api.close(true);if(r.waiting){markBusy(1);while(r.waiting){await new Promise(resolve=>setTimeout(resolve,300));r=await window.pywebview.api.close(true);}markBusy(-1);}if(!r.ok)toast(r.error,true);}finally{closePending=false;}};
 async function poll() {if(pollRunning||!window.pywebview?.api||!state)return;pollRunning=true;try{const r=await window.pywebview.api.request('poll',{revision:state.revision,job_version:job.version});if(r.ok)accept(r);}finally{pollRunning=false;}}
 window.addEventListener('pywebviewready',async()=>{markBusy(1);try{await rpc('init');theme(state.theme);if(!state.api_intro_seen)await apiIntro();}catch(e){toast(e.message,true);$('status').textContent=e.message;}finally{markBusy(-1);}setInterval(poll,500);});
 window.spire={get state(){return state;},get selected(){return [...selected];},get rows(){return flat;},get job(){return job;},act,theme,renderVirtual,showProgress};
 
-async function showVersions(versions){
- const body=el('div'),search=input('');search.placeholder='搜索模组名称、版本或备份包号…';body.append(search);search.oninput=()=>{for(const row of body.querySelectorAll('.version-entry'))row.hidden=!row.textContent.toLowerCase().includes(search.value.trim().toLowerCase());};body.append(note('可从所选版本取出对应模组目录，或安装到本地 mods。版本相同也可能内容不同。适用版本由作者声明；未声明不等于兼容。安装后仍需更新模组列表、选择开关并预览应用。Steam 后续更新可能覆盖工坊目录。'));
- if(!versions.length)body.append(note('尚无版本记录。如需保留旧版，在更新与备份设置中开启缓存，再更新模组列表。'));
- for(const v of versions){const row=el('div','version-entry'),label=el('pre','',v.mods.map(m=>`${m.nickname||m.name} · ${m.version||'版本未声明'}`).join('\n')+`\n${v.created} · ${v.available?'可以取回':'需要找回备份包'}${v.export?' · '+v.export.part:''}`),button=el('button','','取出模组文件'),details=el('details'),summary=el('summary','','文件信息');details.append(summary,el('pre','',`${v.files} 个文件 · ${v.digest}\n${v.source}\n${v.export?v.export.entry:v.archive||''}`));row.append(label,button,details);body.append(row);button.onclick=()=>extractVersion(v);}
-
- dialog('版本与备份记录',body,[{label:'关闭',value:'close'}],true);
+async function showVersions(versions,context=null){
+ const body=el('div'),search=input('');search.placeholder='搜索模组名称、版本或备份包号…';
+ if(context){
+  body.append(note('本机文件 · '+context.copies.length+' 份（包含隐藏副本，不代表都能同时加载）'));
+  for(const m of context.copies)body.append(el('div','version-local'+(m.predicted?' version-active':''),`${m.version||'版本未声明'} · ${m.source==='steam_workshop'?'工坊 '+m.workshop_id:'游戏 mods'} · ${m.predicted?'启用时预计采用':m.loadable?'可选择的另一份文件':'不会采用此副本'} · ${m.enabled?'开启':'关闭'}`));
+ }
+ if(context?.mod.remote_updated)body.append(note('工坊更新时间：'+new Date(context.mod.remote_updated*1000).toLocaleString()+(context.mod.missing?' · 未下载，版本待确认':' · 更新时间不等于模组版本号，需下载后核对内容')));
+ body.append(search);search.oninput=()=>{for(const row of body.querySelectorAll('.version-entry'))row.hidden=!row.textContent.toLowerCase().includes(search.value.trim().toLowerCase());};
+ body.append(note('最新记录：最近一次记录到的版本；曾有记录：更早的版本。备份状态另列。绿色边框表示启用时预计采用的本地版本，与当前是否开启无关。这里是本机记录，不代表工坊的最新发布版本。'));
+ if(!versions.length)body.append(note('尚无历史版本记录。更新模组列表后会保留版本信息；开启临时备份后才会保存模组文件。'));
+ const latestByMod=new Map();
+ for(const v of versions)for(const m of v.mods){const previous=latestByMod.get(m.id);if(!previous||(v.last_seen||v.created)>(previous.last_seen||previous.created))latestByMod.set(m.id,v);}
+ const normalizedPath=p=>String(p||'').replaceAll('\\','/').toLowerCase();
+ for(const v of versions){
+  const latest=v.mods.some(m=>latestByMod.get(m.id)===v);
+  const active=v.current_file&&context?.copies.filter(m=>m.predicted&&normalizedPath(m.package_root)===normalizedPath(v.source));
+  const chosen=Boolean(active?.length);
+  const row=el('div','version-entry'+(chosen?' version-active':'')),status={local:'本地有备份',exported:'已导出备份',recorded:'没有备份'}[v.backup_state]||'没有备份';
+  const label=el('div','version-label'),title=el('strong','',v.mods.map(m=>`${m.nickname||m.name} · ${m.version||'版本未声明'}`).join(' / '));
+  label.append(title,el('div','version-record-state',(latest?'最新记录':'曾有记录')+(chosen?' · 启用时预计采用':'')),el('div','version-backup-state '+(v.backup_state||'recorded'),status+(v.export?' · '+v.export.part:'')+(v.export&&!v.available?' · 需找回备份包':'')+(v.current_match?' · 与当前文件内容一致':'')),note('首次记录 '+v.created+(v.last_seen?' · 最近核对 '+v.last_seen:'')));
+  if(v.same_version_variants>1&&!v.record_only)label.append(note('同版本号，文件内容不同 · 内容编号 '+v.digest.slice(0,8)));
+  const details=el('details'),summary=el('summary','','文件与适配信息');
+  if(v.file_changes?.length)details.append(note('与另一份同版本号记录相比：'),el('pre','',v.file_changes.map(f=>f.kind+' · '+f.file).join('\n')));
+  details.append(summary,el('pre','',v.mods.map(m=>'适用版本（作者声明）：'+(compatibilityText(m)||'未声明')).join('\n')+`\n${v.files} 个备份文件\n${v.source}\n${v.export?v.export.entry:v.archive||'未保存文件'}`));
+  row.append(label,details);
+  if(v.backup_state!=='recorded'){
+   const actions=el('div','version-actions'),button=el('button','','取出模组文件');button.onclick=()=>extractVersion(v);actions.append(button);
+   if(context){const rollback=el('button','',v.available?'回滚到此版本':'找回备份包以回滚');rollback.onclick=()=>rollbackVersion(v,context);actions.append(rollback);}
+   row.append(actions);
+  }
+  body.append(row);
+ }
+ dialog(context?context.mod.nickname+' · 历史版本':'版本与备份记录',body,[{label:'关闭',value:'close'}],true);
+}
+async function rollbackVersion(v,context){
+ if(!v.available){await chooseBackupPacks();return;}
+ const body=el('div');body.append(note('将这份旧版放入当前游戏的 mods 文件夹。回滚前会强制备份本机同 ID 的当前版本，即使临时备份开关已关闭；这会占用磁盘空间。为保留配套资源，当前版本会按所在模组包完整备份，共用目录可能包含其他模组。'),note('本地 mods 中的同 ID 版本会被替换，原工坊文件保留。恢复后会准备开关草稿，仍需“预览并应用”才能生效。其他模组的依赖和游戏适配不保证兼容。'));
+ if(state.game==='sts1')body.append(note('塔一提示：ModTheSpire 可能仍优先采用同 ID 的新版工坊文件。回滚只恢复文件，不保证能直接选择旧版；请核对重复副本。'));
+ const ok=await dialog('回滚版本',body,[{label:'取消',value:false},{label:'备份当前版本并回滚',value:true,primary:true}],true);
+ if(ok!==true)return;
+ const result=await fire('version_rollback',{package:v.package,digest:v.digest,mod_id:context.mod.id});
+ if(result)dialog('版本文件已恢复',result.message+'\n\n'+result.path,[{label:'知道了',value:'close'}],true);
 }
 async function allVersions(){const r=await fire('versions');if(r)showVersions(r);};
 // Pointer gestures use logical row bounds so virtualization never loses hits.
@@ -399,7 +542,97 @@ async function chooseBackupPacks(){const result=await dialog('添加备份包','
 
 async function apiIntro(fromManagement=false){const body=el('div');body.append(note('可选：使用自己的 Steam Web API Key，可以批量获取模组标题和封面，比匿名网页查询更快、更稳定。它不负责下载模组；不配置也能管理开关。'),note('获取：打开 Steam 官方 Key 页面 → 登录自己的账号 → 按页面要求填写关联域名并同意条款 → 将 32 位 Key 粘贴到本管理器的账号设置。'),note('请保护好 Key：不要分享、截图或上传 GitHub。默认仅在本次会话使用；选择本机保存时由 Windows 加密。泄露后请在 Steam 官方页面撤销并重新申请。'));const link=el('button','','打开 Steam 官方 Key 页面');link.onclick=()=>fire('api_page');body.append(link);const result=await dialog('可选：用 Steam API 加快信息更新',body,fromManagement?[{label:'返回 API 管理',value:'back',primary:true}]:[{label:'稍后设置',value:'later'},{label:'设置 API',value:'setup',primary:true}],true);await fire('api_intro_seen');if(fromManagement||result==='setup')await account();}
 
-function renderTaskLog(container,view,fallback=''){if(!view?.rows?.length){container.textContent=fallback?'这份记录没有进度概览，可展开下方详细记录查看。':'暂无任务记录';return;}if(!container.querySelector('.task-rows'))container.replaceChildren(el('div','task-rows'),el('div','task-problems'));const rows=container.querySelector('.task-rows'),wanted=new Set();for(const row of view.rows){wanted.add(row.id);let node=[...rows.children].find(n=>n.dataset.id===row.id);if(!node){node=el('div','task-row');node.dataset.id=row.id;rows.append(node);}node.dataset.status=row.status;if(node.textContent!==row.text)node.textContent=row.text;}for(const node of [...rows.children])if(!wanted.has(node.dataset.id))node.remove();const problems=container.querySelector('.task-problems'),pending=(view.problems||[]).filter(p=>/^\d+$/.test(String(p.id))),signature=JSON.stringify(pending);if(problems.dataset.signature!==signature){problems.dataset.signature=signature;problems.replaceChildren();if(pending.length){problems.append(el('strong','',`未完成项目 · ${pending.length} 项`));for(const problem of pending){const mod=state?.mods.find(m=>m.workshop_id===problem.id);problems.append(el('div','task-problem',`${mod?.nickname||'工坊模组'} [${problem.id}] · ${problem.phase}：${problem.reason}`));}}}}
+function renderTaskLog(container,view,fallback=''){if(!view?.rows?.length){container.textContent=fallback?'这份记录没有进度概览，可展开下方详细记录查看。':'暂无任务记录';return;}if(!container.querySelector('.task-rows'))container.replaceChildren(el('div','task-rows'),el('div','task-problems'));const rows=container.querySelector('.task-rows'),wanted=new Set();for(const row of view.rows){wanted.add(row.id);let node=[...rows.children].find(n=>n.dataset.id===row.id);if(!node){node=el('div','task-row');node.dataset.id=row.id;rows.append(node);}node.dataset.status=row.status;if(node.textContent!==row.text)node.textContent=row.text;}for(const node of [...rows.children])if(!wanted.has(node.dataset.id))node.remove();const problems=container.querySelector('.task-problems'),pending=(view.problems||[]).filter(p=>/^\d+$/.test(String(p.id))),changes=view.changes||{},signature=JSON.stringify({pending,changes});if(problems.dataset.signature!==signature){problems.dataset.signature=signature;problems.replaceChildren();if(pending.length){problems.append(el('strong','',`未完成项目 · ${pending.length} 项`));for(const problem of pending){const mod=state?.mods.find(m=>m.workshop_id===problem.id);problems.append(el('div','task-problem',`${mod?.nickname||'工坊模组'} [${problem.id}] · ${problem.phase}：${problem.reason}`));}}
+ const count=Object.values(changes).reduce((n,items)=>n+items.length,0);
+ if(count){const section=el('details','task-changes'),heading=el('summary','',`注意 · 列表变化 ${count} 项`);section.open=true;section.append(heading);
+ for(const [key,label] of [['added','新增'],['updated','信息更新'],['missing','本地消失']]){const items=changes[key]||[];if(!items.length)continue;section.append(el('strong','',`${label} · ${items.length} 项`));for(const m of items)section.append(el('div','task-problem',`${m.name||m.id||'未知模组'}${m.workshop_id?' ['+m.workshop_id+']':''} · ${m.previous_version&&m.previous_version!==m.version?m.previous_version+' → ':''}${m.version||'版本未声明'}${m.reason?' · '+m.reason:''}`));}
+ section.append(note('本地消失仅表示本次没有扫描到文件；不代表确认下架，已有历史和备份记录保留。'));problems.append(section);}
+ }}
 
-function renderInventory(){if(!state)return;const n=$('scanStatus'),phase=job.running&&job.local_scanning?'scanning':state.scan_state?.phase||'not_scanned';const labels={scanning:'正在扫描本地…',complete:'本地扫描完成',attention:'本地扫描有提示',failed:'本地扫描失败',not_configured:'未配置本地路径',not_scanned:'尚未扫描本地'};const signature=JSON.stringify([phase,state.inventory,state.counts.total,state.scan_state?.checked_at]);if(n.dataset.signature===signature)return;n.dataset.signature=signature;n.dataset.phase=phase;n.replaceChildren(el('span','',labels[phase]||'尚未扫描本地'),el('small','',`本地可用 ${state.inventory?.available||0} / 列表 ${state.counts.total}`));n.title=`扫描时间：${state.scan_state?.checked_at||'尚无'}\n本地文件 ${state.inventory?.local||0} · 可配置 ${state.inventory?.available||0} · 缺失 ${state.inventory?.missing||0}`;}
-async function showModLists(){const missingKeys=[...selected].filter(k=>mods.get(k)?.missing),body=el('div');body.append(note('分享模组清单、昵称、标签、分组、开关方案与期望开关。不包含模组文件、个人路径、API Key 或历史备份记录。导入不会自动订阅或下载。'));const action=await dialog('模组清单',body,[{label:'关闭',value:'close'},...(missingKeys.length?[{label:'移除选中缺失项',value:'forget'}]:[]),{label:'导出清单',value:'export'},{label:'导入清单',value:'import',primary:true}]);if(action==='forget'){if(await confirm('仅从清单中移除选中的缺失记录，可用 Ctrl Z 撤销；不删除文件、不取消订阅。'))await fire('list_forget_missing',{keys:missingKeys});return;}if(action==='export'){await exportFile('export');return;}if(action!=='import')return;try{const r=await window.pywebview.api.file('list_import');if(!r.ok)throw Error(r.error);if(!r.path)return;const p=r.preview,preview=el('div'),overwrite=checkbox('用清单替换同一模组的昵称、分组、标签及同名方案',false),switches=checkbox('按清单设置开关草稿（仍需预览并应用）',true);preview.append(note(`清单 ${p.total} 项 · 本地匹配 ${p.local} · 缺失或需确认 ${p.missing} · 开关方案 ${p.profiles}`),note('默认合并：保留本地已有昵称和分组，补充标签；不会移除清单之外的模组。缺失项以黄色标记保留，可通过“打开创意工坊”手动订阅，下载后更新列表。'),overwrite.node,switches.node,note(p.names.join('、')+(p.total>15?'…':'')));if(await dialog('导入清单预览',preview,[{label:'取消',value:false},{label:'确认导入',value:true,primary:true}])===true){await act('list_import_apply',{token:r.token,overwrite:overwrite.box.checked,switches:switches.box.checked});toast('清单已合并；仅修改本地整理信息和开关草稿。');}}catch(e){toast(e.message,true);}}
+function renderInventory(){
+ if(!state)return;
+ const n=$('scanStatus'),phase=job.running&&job.local_scanning?'scanning':state.scan_state?.phase||'not_scanned';
+ const labels={scanning:'正在扫描本地…',complete:'本地扫描完成',attention:'本地扫描有提示',failed:'本地扫描失败',not_configured:'未配置本地路径',not_scanned:'尚未扫描本地'};
+ const total=state.counts.total,local=state.inventory?.local||0,available=state.inventory?.available||0,missing=state.inventory?.missing||0;
+ const signature=JSON.stringify([phase,state.inventory,total,state.counts.hidden,state.scan_state?.checked_at]);if(n.dataset.signature===signature)return;
+ n.dataset.signature=signature;n.dataset.phase=phase;
+ const caption=`列表 ${total} 项 · 本地 ${local} 项 · 可用 ${available} 项 · 缺失 ${missing} 项 · 隐藏旧副本 ${state.counts.hidden||0} 项`;
+ const meter=el('button','inventory-meter'),blue=el('span','inventory-subscribed'),yellow=el('span','inventory-local'),green=el('span','inventory-available');
+ const subscribed=state.inventory?.subscribed;
+ const subscriptionCaption=subscribed==null?'Steam 订阅未确认':`Steam 已订阅 ${subscribed} 项`;
+ blue.style.width=(total?(local+(state.inventory?.subscribed_missing||0))/total*100:0)+'%';
+ meter.type='button';meter.setAttribute('aria-label',caption+' · '+subscriptionCaption+'。点击查看数量与原因');
+ meter.title=caption+' · '+subscriptionCaption+'\n白底：全部清单；蓝色：已订阅、尚未扫描到文件；黄色：本地文件；绿色：本地可配置。';
+ yellow.style.width=(total?local/total*100:0)+'%';green.style.width=(total?available/total*100:0)+'%';
+ meter.append(blue,yellow,green);meter.onclick=showInventory;
+ n.replaceChildren(el('span','',labels[phase]||'尚未扫描本地'),meter);
+ n.title=`扫描时间：${state.scan_state?.checked_at||'尚无'}\n${caption}`+(phase==='scanning'?'\n正在重新扫描，比例暂为上次结果':'');
+}
+async function showInventory(){
+ const body=el('div'),inventory=state.inventory||{};
+ body.append(note(`清单共 ${state.counts.total} 项 · 本地文件 ${inventory.local||0} 项 · 可用 ${inventory.available||0} 项 · 缺失 ${inventory.missing||0} 项`),note('白底代表全部清单，蓝色代表已订阅但尚未扫描到文件，黄色代表本地文件，绿色代表本地可配置。直接安装的本地模组从黄色算起。'),
+ note(inventory.subscribed==null?'Steam 订阅状态尚未确认。':'Steam 已确认订阅 '+inventory.subscribed+' 项，其中 '+inventory.subscribed_missing+' 项尚未扫描到文件。'));
+ if(state.counts.hidden)body.append(note(`当前隐藏 ${state.counts.hidden} 个被替代的旧副本；它们仍在本地，所以计入清单总数。`));
+ const unavailable=state.mods.filter(m=>!m.missing&&!m.loadable);
+ for(const m of unavailable){const row=el('div','inventory-detail');row.append(el('strong','',`${m.nickname} · ${m.version||'版本未声明'}`));const siblings=state.mods.filter(x=>x.id===m.id&&!x.missing&&x.loadable);row.append(note(m.superseded?'同 ID 的旧副本被加载器遮蔽'+(siblings.length?'；当前可采用：'+siblings.map(x=>`${x.nickname} ${x.version}`).join('、'):''):m.loader_status));if(m.workshop_id)row.append(note('工坊号：'+m.workshop_id));body.append(row);}
+ if(!unavailable.length&&!inventory.missing)body.append(note('清单内的本地文件均可配置。'));
+ const statuses=Object.entries(steamStatusLabels).map(([status,label])=>[label,state.mods.filter(m=>m.missing&&m.subscription_status===status).length]).filter(([,count])=>count);
+ if(statuses.length)body.append(note(statuses.map(([label,count])=>label+' '+count+' 项').join(' · ')));
+ const action=await dialog('清单与本地资源',body,[{label:'关闭',value:'close'},...(state.game==='sts2'&&!state.demo_mode?[{label:'刷新 Steam 订阅状态',value:'steam'}]:[]),...(state.counts.hidden?[{label:'显示隐藏旧副本',value:'reveal',primary:true}]:[])]);
+ if(action==='steam'){
+   try{await rpc('subscription_status');await showInventory();}catch(e){toast(e.message,true);}
+ }
+ if(action==='reveal')await fire('view',{hide_unavailable:false,query:'',group:'全部分组'});
+}
+async function showModLists(){const missingKeys=[...selected].filter(k=>mods.get(k)?.missing),body=el('div');body.append(note('分享模组清单、昵称、标签、分组、开关方案与期望开关。不包含模组文件、个人路径、API Key 或历史备份记录。导入不会自动订阅或下载。'));const action=await dialog('模组清单',body,[{label:'关闭',value:'close'},...(missingKeys.length?[...(state.game==='sts2'&&!state.demo_mode?[{label:'订阅选中缺失模组',value:'subscribe'}]:[]),{label:'移除选中缺失项',value:'forget'}]:[]),{label:'导出清单',value:'export'},{label:'导入清单',value:'import',primary:true}]);if(action==='subscribe'){await showSubscribe(missingKeys);return;}if(action==='forget'){if(await confirm('仅从清单中移除选中的缺失记录，可用 Ctrl Z 撤销；不删除文件、不取消订阅。'))await fire('list_forget_missing',{keys:missingKeys});return;}if(action==='export'){await exportFile('export');return;}if(action!=='import')return;try{const r=await window.pywebview.api.file('list_import');if(!r.ok)throw Error(r.error);if(!r.path)return;const p=r.preview,preview=el('div'),overwrite=checkbox('用清单替换同一模组的昵称、分组、标签及同名方案',false),switches=checkbox('按清单设置开关草稿（仍需预览并应用）',true);preview.append(note(`清单 ${p.total} 项 · 本地匹配 ${p.local} · 缺失或需确认 ${p.missing} · 开关方案 ${p.profiles}`),note('默认合并：保留本地已有昵称和分组，补充标签；不会移除清单之外的模组。缺失项以黄色标记保留，可通过“打开创意工坊”手动订阅，下载后更新列表。'),overwrite.node,switches.node,note(p.names.join('、')+(p.total>15?'…':'')));if(await dialog('导入清单预览',preview,[{label:'取消',value:false},{label:'确认导入',value:true,primary:true}])===true){await act('list_import_apply',{token:r.token,overwrite:overwrite.box.checked,switches:switches.box.checked});toast('清单已合并；仅修改本地整理信息和开关草稿。');}}catch(e){toast(e.message,true);}}
+
+$('steamImport').onclick=()=>showCollectionImport(true);
+async function showCollectionImport(direct=false){
+ const body=el('div'),url=input('');if(state.demo_mode)body.append(note('当前为空白清单体验：输入真实模组或合集链接即可联网读取。清单保存在临时目录，与正式数据隔离；关闭后清理。'));url.placeholder='模组或合集链接、编号';body.append(note('仅导入管理器清单，不订阅、不下载、不改变当前开关。重复导入合并成员；不会移除原有项目。'),field('创意工坊模组或合集',url));
+ if(await dialog(direct?'从 Steam 订阅':'从工坊合集导入',body,[{label:'取消',value:false},{label:'读取合集',value:true,primary:true}],true)!==true)return;
+ const progress=el('div');progress.append(note('正在识别游戏并读取工坊信息…'));
+ const waiting=dialog('读取合集',progress,[{label:'收起',value:'close'}],true);markBusy(1);
+ try{const r=await window.pywebview.api.collection_preview(url.value);if(!r.ok)throw Error(r.error);
+ await act('poll',{revision:-1});
+ const preview=el('div');preview.append(el('strong','',r.title),note(r.game==='sts1'?'尖塔 I':'尖塔 II'),note(`共 ${r.total} 项 · 本地已有 ${r.local} · 本地缺失 ${r.total-r.local}`),note('合集可在“合集分组”中查看。缺失项下载后更新列表即可关联。'),el('pre','collection-preview',r.names.join('\n')));
+ if(r.warnings.length)preview.append(note('未确认／跳过：'+r.warnings.join('；')));
+ const actions=[{label:'取消',value:false},{label:'确认导入',value:true,primary:true}];
+ if(direct&&!state.demo_mode&&r.game==='sts2')actions.push({label:'导入并预览订阅',value:'subscribe'});
+ const choice=await dialog(r.single?'模组导入预览':'合集导入预览',preview,actions,true);
+ if(choice===true||choice==='subscribe'){
+   const merged=await act('collection_import',{token:r.token});
+   if(choice==='subscribe'&&merged?.keys?.length)await showSubscribe(merged.keys);
+   else toast('工坊清单已合并。');
+ }
+ }catch(e){dialog('未能导入合集',e.message,[{label:'关闭',value:'close'}],true);}finally{markBusy(-1);}
+}
+
+async function showSubscribe(keys){
+ if(state.demo_mode||state.game!=='sts2')return;
+ const hint=el('div');hint.append(note('此功能要求 Steam 已运行并登录，且已设置塔二路径与对应账号配置。读取预览不会订阅。确认提交后，Steam 会自动安排下载，可能立即占用网络和磁盘。'),note('不会启动游戏或修改模组开关；Steam 新订阅项仍需在下载后核对是否启用。'));
+ if(await dialog('订阅缺失模组',hint,[{label:'取消',value:false},{label:'检查账号并预览名单',value:true,primary:true}],true)!==true)return;
+ let plan;
+ try{plan=await rpc('subscription_preview',{keys});}catch(e){toast(e.message,true);return;}
+ const body=el('div');body.append(note('当前 Steam 账号：'+plan.account),note(`共 ${plan.items.length} 项 · 已订阅 ${plan.items.filter(m=>m.already).length} 项（将跳过）`),el('pre','collection-preview',plan.items.map(m=>m.name+' ['+m.id+']'+(m.already?' · 已订阅':'')).join('\n')),note('确认后由 Steam 自动下载。停止仅停止后续提交，已经提交的订阅或下载不会自动撤销。保持 Steam 运行并登录；下载完成后更新模组列表。'));
+ if(await dialog('确认订阅并下载',body,[{label:'取消',value:false},{label:'订阅并交给 Steam 下载',value:true,primary:true}],true)===true){try{const started=await rpc('subscription_start',{token:plan.token});if(started?.started)showProgress();}catch(e){toast(e.message,true);}}
+}
+
+function renderSubscriptionMode(){
+ const on=Boolean(state.subscription_mode);document.body.classList.toggle('subscription-mode',on);const batchLabel=$('displayMenu').querySelectorAll('.menu-label')[1];if(batchLabel)batchLabel.textContent=on?'批量勾选 · 当前筛选结果':'批量开关 · 当前筛选结果';columnDefs[0][1]=on?'订阅':'开关';$('subscriptionMode').classList.toggle('active',on);$('subscriptionMode').textContent=on?'返回模组管理':'辅助订阅';$('subscriptionMode').setAttribute('aria-pressed',String(on));$('subscriptionTools').hidden=!on;$('apply').hidden=on;$('master').parentElement.hidden=on||state.game!=='sts2';$('filterOn').textContent=on?'全部勾选':'全部开启';$('filterOff').textContent=on?'取消勾选':'全部关闭';$('submitSubscriptions').textContent=`订阅已勾选（${new Set([...subscriptionPicked].map(k=>mods.get(k)?.workshop_id)).size}）`;
+ const hint=document.querySelector('.table-hint').lastElementChild;hint.textContent=on?'仅显示尚未订阅的工坊项目 · 勾选后预览并确认':'修改后需预览并应用';
+}
+function pickSubscriptions(keys,value=null){
+ const allowed=new Set(state.subscription_keys||[]);keys=keys.filter(k=>allowed.has(k));const on=value===null?!keys.every(k=>subscriptionPicked.has(k)):value;
+ for(const k of keys)if(on)subscriptionPicked.add(k);else subscriptionPicked.delete(k);
+ renderSubscriptionMode();renderVirtual(true);updateControls();
+}
+$('subscriptionMode').onclick=async()=>{await changeSubscriptionMode(!state.subscription_mode);};
+$('pickSelected').onclick=()=>pickSubscriptions([...selected],true);
+$('submitSubscriptions').onclick=()=>showSubscribe([...subscriptionPicked]);
+
+async function changeSubscriptionMode(enabled){
+ const button=$('subscriptionMode'), refresh=$('refreshSubscriptions');
+ button.disabled=true;refresh.disabled=true;
+ try{await rpc('subscription_mode',{enabled});}catch(e){toast(e.message,true);}finally{updateControls();}
+}
+$('refreshSubscriptions').onclick=()=>changeSubscriptionMode(true);

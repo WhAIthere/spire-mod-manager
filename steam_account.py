@@ -163,7 +163,7 @@ class AccountTitleQuery:
                 title = str(row.get("title") or "").strip()
                 if consumer is not None and str(consumer) != self.appid:
                     result["error"] = "接口条目所属游戏不匹配，未使用此标题"
-                elif row.get("result") == 1 and title:
+                elif row.get("result") == 1 and (title or self.previews):
                     result.update(status="success", title=title, page_title=title)
                     if self.previews:
                         from covers import preview_url

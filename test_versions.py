@@ -22,6 +22,58 @@ class VersionsTest(unittest.TestCase):
     z.writestr('x','corrupt');z.writestr('resource','same')
    with self.assertRaises(ValueError):store.restore(old['package'],old['digest'])
    self.assertEqual((pkg/'x').read_text(),'old')
+ def test_observed_versions_are_not_backups_or_export_candidates(self):
+  from release_store import pending, export_release
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);pkg=root/'123';pkg.mkdir();(pkg/'x').write_bytes(b'one')
+   m=Mod('sts2','m','Name','1',pkg/'x','steam_workshop','123',package_root=pkg)
+   store=VersionStore(root/'data');store.observe('sts2',[m]);store.observe('sts2',[m])
+   v=store.versions('sts2')[0];self.assertEqual(len(store.versions('sts2')),1)
+   self.assertEqual(v['backup_state'],'recorded');self.assertFalse(v['available']);self.assertEqual(pending(store),[])
+   with self.assertRaisesRegex(ValueError,'没有备份'):store.extract(v['package'],v['digest'],root/'out')
+   (pkg/'x').write_bytes(b'two');m.version='2';store.observe('sts2',[m])
+   store.capture('sts2',[m]);states=store.versions('sts2')
+   self.assertEqual(len(states),2);self.assertEqual({v['backup_state'] for v in states},{'recorded','local'})
+   export_release(store,root/'exports');v=next(v for v in store.versions('sts2') if v['export'])
+   self.assertEqual(v['backup_state'],'exported');self.assertTrue(v['available'])
+   Path(store.index['release_locations'][v['export']['part']]).unlink()
+   v=next(v for v in store.versions('sts2') if v['export']);self.assertFalse(v['available']);self.assertEqual(v['backup_state'],'exported')
+   store.capture('sts2',[m],force=True);v=next(v for v in store.versions('sts2') if v['export'])
+   self.assertEqual(v['backup_state'],'local');self.assertTrue(v['available']);self.assertEqual(pending(store),[])
+ def test_legacy_export_matches_current_without_creating_a_duplicate_or_cache(self):
+  from release_store import export_release
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);pkg=root/'123';pkg.mkdir();(pkg/'x').write_bytes(b'same')
+   m=Mod('sts2','m','English','1',pkg/'x','steam_workshop','123',package_root=pkg)
+   store=VersionStore(root/'data');store.capture('sts2',[m]);export_release(store,root/'exports')
+   package=next(iter(store.index['packages'].values()));v=package['versions'][0]
+   v.pop('observation',None);package.pop('current_digest',None)
+   legacy=store.observation([m.record()])
+   package['versions'].append({'digest':legacy,'observation':legacy,'record_only':True,'created':'2026-11-03','origin':'observation','files':{},'mods':[m.record()]})
+   Path(store.index['release_locations'][v['export']['part']]).unlink()
+   m.name='中文标题';store.observe('sts2',[m]);rows=store.versions('sts2')
+   self.assertEqual(len(rows),1);self.assertTrue(rows[0]['current_match']);self.assertEqual(rows[0]['mods'][0]['name'],'中文标题')
+   self.assertEqual(rows[0]['backup_state'],'exported');self.assertFalse(rows[0]['available'])
+   self.assertFalse(Path(rows[0]['archive']).exists())
+   store.capture('sts2',[m]);self.assertEqual(len(store.versions('sts2')),1)
+   self.assertFalse(Path(store.versions('sts2')[0]['archive']).exists())
+
+ def test_asset_change_with_unchanged_manifest_is_a_distinct_observation(self):
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);pkg=root/'123';pkg.mkdir();(pkg/'x').write_bytes(b'manifest');(pkg/'asset').write_bytes(b'old')
+   m=Mod('sts2','m','Name','1',pkg/'x','steam_workshop','123',package_root=pkg)
+   store=VersionStore(root/'data');store.capture('sts2',[m]);(pkg/'asset').write_bytes(b'changed')
+   store.observe('sts2',[m]);rows=store.versions('sts2')
+   self.assertEqual(len(rows),2);self.assertFalse(any(v['current_match'] for v in rows))
+   self.assertEqual({v['backup_state'] for v in rows},{'recorded','local'})
+ def test_same_author_version_keeps_distinct_content_and_lists_changed_files(self):
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);pkg=root/'123';pkg.mkdir();(pkg/'manifest.json').write_bytes(b'same');(pkg/'a.dll').write_bytes(b'old')
+   m=Mod('sts2','m','Name','1.2.1',pkg/'manifest.json','steam_workshop','123',package_root=pkg)
+   store=VersionStore(root/'data');store.capture('sts2',[m]);(pkg/'a.dll').write_bytes(b'new');store.capture('sts2',[m])
+   rows=store.versions('sts2','m');self.assertEqual(len(rows),2)
+   self.assertTrue(all(v['same_version_variants']==2 for v in rows))
+   self.assertTrue(all(v['file_changes']==[{'file':'a.dll','kind':'修改'}] for v in rows))
  def test_migrate_legacy_and_resume(self):
   import io,hashlib
   with tempfile.TemporaryDirectory() as d:

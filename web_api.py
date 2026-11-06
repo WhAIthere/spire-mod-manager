@@ -2,6 +2,7 @@
 from datetime import datetime
 import json
 import os
+import subprocess
 from pathlib import Path
 import webbrowser
 import uuid
@@ -18,14 +19,85 @@ class Api:
     def __init__(self, model):
         self._model = model
         self._jobs = Jobs(model)
+        self._jobs.api_key=getattr(model,'borrowed_api_key','') or ''
         self._window = None
         self._ready = False
         self._allow_close = False
         self._list_preview = None
 
+    def collection_preview(self,value):
+        try:
+            import workshop_collections
+            with self._model.lock:game=self._model.game_id
+            key=self._jobs.api_key or (load_key(self._model.directory/'credentials/steam-api-key.bin') if self._model.store.get('workshop_access',{}).get('method')=='account_api' else '')
+            if hasattr(self._model, 'collection_fixture'):
+                target_game, collection = game, self._model.collection_fixture
+            else:
+                target_game, collection = workshop_collections.resolve(
+                    value, request=lambda method, ids: workshop_collections.post(method, ids, key))
+
+            with self._model.lock:
+                if game!=self._model.game_id:raise ValueError('游戏已切换，请重新获取合集。')
+                if self._jobs.value['running']:
+                    raise ValueError('请先等待后台任务完成。')
+                self._model.change_game(target_game)
+                token=uuid.uuid4().hex
+                self._collection_preview={'token':token,'game':target_game,'collection':collection}
+                ids={m.workshop_id for m in self._model.mods if not m.missing and m.source=='steam_workshop'}
+                return {'ok':True,'token':token,'game':target_game,'single':collection.get('single',False),'title':collection['title'],'total':len(collection['items']),
+                        'local':sum(i in ids for i in collection['items']),'names':[v['title'] for v in collection['items'].values()], 'warnings':collection.get('warnings',[])}
+        except Exception as exc:return {'ok':False,'error':str(exc)}
+
+    def dependency_lookup(self, ids):
+        """Resolve only known Workshop IDs, with network work outside the model lock."""
+        try:
+            import workshop_collections
+            from core import APP_IDS
+            model = self._model
+            with model.lock:
+                game = model.game_id
+                key = self._jobs.api_key or load_key(model.directory/'credentials/steam-api-key.bin')
+            ids = list(dict.fromkeys(str(i) for i in ids if str(i).isascii() and str(i).isdecimal()))
+            items = {}
+            errors = {}
+            for offset in range(0, len(ids), 50):
+                batch = ids[offset:offset+50]
+                try:
+                    response = workshop_collections.post('GetPublishedFileDetails', batch, key)
+                except (OSError, ValueError) as exc:
+                    errors.update({ident:str(exc) for ident in batch})
+                    continue
+                for item in response.get('publishedfiledetails', []):
+                    ident = str(item.get('publishedfileid'))
+                    if ident in batch and item.get('result') == 1 and str(item.get('consumer_app_id')) == APP_IDS[game] and item.get('file_type') != 2:
+                        items[ident] = {'title':str(item.get('title') or '工坊 '+ident), 'confirmed':True}
+            with model.lock:
+                if game != model.game_id:
+                    raise ValueError('游戏已切换，请重新检查前置。')
+                token = uuid.uuid4().hex
+                self._dependency_lookup = {'token':token, 'game':game, 'items':items}
+            return {'ok':True, 'token':token, 'items':items, 'errors':errors}
+        except Exception as exc:
+            return {'ok':False, 'error':str(exc)}
+
     def request(self, action, payload=None):
         try:
             payload = payload or {}
+            if action == 'subscription_status':
+                return self._enter_subscription_mode(enter=False)
+            if action == 'subscription_mode' and payload.get('enabled'):
+                return self._enter_subscription_mode()
+            if action == 'subscription_preview':
+                return self._preview_subscription(payload)
+            if action == 'subscription_start':
+                from subscriptions import validate, validate_account
+                with self._model.lock:
+                    plan = getattr(self,'_subscription_plan',None)
+                    if not plan or payload.get('token') != plan['token']:
+                        raise ValueError('订阅确认已失效，请重新预览。')
+                    validate(self._model, plan)
+                    steam = self._model.steam
+                validate_account(steam, plan)
             with self._model.lock:
                 result = self._run(action, payload)
                 response = {"ok": True, "result": result, "job": self._jobs.snapshot()}
@@ -39,9 +111,61 @@ class Api:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def _enter_subscription_mode(self, enter=True):
+        from steam_workshop import check_account
+        model, jobs = self._model, self._jobs
+        with model.lock:
+            if jobs.value['running']:
+                raise ValueError('请先停止或等待后台任务完成。')
+            if model.game_id != 'sts2':
+                raise ValueError('辅助订阅目前仅支持尖塔 II。')
+            demo = getattr(model, 'demo_mode', False)
+            game_dir, config_path, revision = model.game_dir, model.config_path, model.revision
+            steam = model.steam
+        if demo:
+            snapshot = {'items': {}, 'account': ''}
+        else:
+            if not game_dir:
+                raise ValueError('请先设置塔二游戏目录；Steam 必须已运行并登录。')
+            snapshot = steam(game_dir)
+            check_account(snapshot, config_path)
+        with model.lock:
+            if jobs.value['running'] or revision != model.revision:
+                raise ValueError('清单状态已变化，请重新打开辅助订阅。')
+            if not demo:
+                model.subscription_snapshot = snapshot
+            if enter or model.subscription_view is not None:
+                model.subscription_view = {'ids': set(snapshot['items']), 'account': snapshot['account']}
+            model.changed()
+            return {'ok': True, 'state': model.snapshot(), 'job': jobs.snapshot()}
+
+    def _preview_subscription(self, payload):
+        from subscriptions import preview, validate
+        model, jobs = self._model, self._jobs
+        with model.lock:
+            if jobs.value['running']:
+                raise ValueError('请先等待后台任务完成。')
+            key = jobs.api_key or load_key(model.directory/'credentials/steam-api-key.bin')
+        plan = preview(model, payload.get('keys', []), key)
+        with model.lock:
+            if jobs.value['running']:
+                raise ValueError('后台任务已开始，请稍后重新预览。')
+            validate(model, plan)
+            plan['token'] = uuid.uuid4().hex
+            self._subscription_plan = plan
+            return {'ok':True, 'result':{'token':plan['token'],'account':plan['account'],'items':plan['items']}}
+
     def _run(self, action, p):
         model, jobs = self._model, self._jobs
-        if jobs.value["running"] and action in ("list_import_apply", "game", "scan", "refresh_small", "cache_options", "settings", "account_save", "account_forget", "apply_preview", "apply_commit"):
+        if model.subscription_view is not None and action=="toggle":raise ValueError("辅助订阅模式不修改游戏开关，请使用订阅勾选。")
+        if getattr(model,'demo_mode',False) and action not in {
+            'init','poll','game','subscription_mode','api_intro_seen','view','theme','titlebar','toggle','undo','redo','master',
+            'dependencies','profile_save','profile_restore','profile_delete','alias','group','group_rename',
+            'tags_add','tags_remove','tags_rename','list_forget_missing','list_import_apply','collection_import',
+            'details','issues','logs','log_read','log','dependency_page','open_workshop','account_info','account_save',
+            'account_forget','api_page','refresh_small','refresh_selected','titles_start','covers_start','job_stop'}:
+            raise ValueError('空白清单体验仅支持清单整理与工坊信息获取，不扫描真实文件、不备份、不修改游戏。')
+        if jobs.value["running"] and action in ("list_import_apply", "game", "scan", "refresh_small", "refresh_selected", "cache_options", "settings", "account_save", "account_forget", "apply_preview", "apply_commit"):
             raise ValueError("请先停止后台获取任务或等待备份完成，再切换游戏、配置或应用。")
         if action == "init":
             if not self._ready:
@@ -59,6 +183,8 @@ class Api:
             model.store['backup_cache_enabled']=bool(p.get('enabled',False));model.save();model.changed()
         elif action == "refresh_small":
             jobs.start_scan(metadata_only=True)
+        elif action == "refresh_selected":
+            jobs.start_scan(p.get('discard',False),parts=p.get('parts',[]),scope=p.get('scope','changed'))
         elif action == "logs":
             files=sorted((model.directory/'logs').glob('*.log'),key=lambda f:f.stat().st_mtime,reverse=True)
             view=jobs.user_log.snapshot(jobs.value['running'])
@@ -107,11 +233,34 @@ class Api:
             result=mod_lists.import_list(model,pending['data'],bool(p.get('overwrite')),bool(p.get('switches',True)))
             self._list_preview=None
             return result
+        elif action == 'collection_import':
+            if jobs.value['running']:raise ValueError('请先等待后台任务完成。')
+            import workshop_collections
+            pending=getattr(self,'_collection_preview',None)
+            if not pending or pending['token']!=p.get('token') or pending['game']!=model.game_id:raise ValueError('合集预览已失效，请重新获取。')
+            result=workshop_collections.merge(model,pending['collection'])
+            self._collection_preview=None
+            return {'count':result,'keys':[m.key for m in model.mods if m.source=='steam_workshop' and m.workshop_id in pending['collection']['items'] and m.missing]}
+        elif action == 'subscription_mode':
+            if jobs.value['running']:
+                raise ValueError('请先停止或等待后台任务完成。')
+            model.subscription_view = None
+            model.changed()
+        elif action == 'subscription_start':
+            plan=getattr(self,'_subscription_plan',None)
+            if not plan or p.get('token')!=plan['token']:raise ValueError('订阅确认已失效，请重新预览。')
+            self._subscription_plan=None
+            jobs.start_subscriptions(plan)
+            return {"started":True}
         elif action == "release_info":
             from release_store import info
             return info(model.versions)
         elif action == "versions":
+            if not jobs.value['running']: model.versions.observe(model.game_id, model.mods)
             return model.versions.versions(model.game_id)
+        elif action == 'version_rollback':
+            if jobs.value['running']: raise ValueError('请先停止后台任务。')
+            return model.rollback_version(p['package'],p['digest'],p['mod_id'])
         elif action == "version_restore":
             model.require_discard(False)
             if jobs.value["running"]: raise ValueError("请先停止后台任务。")
@@ -124,7 +273,7 @@ class Api:
             model.rescan(discard=True)
             return {"rollback": rollback}
         elif action == "details":
-            return model.details(p["key"])
+            return model.details(p["key"],observe=not jobs.value['running'])
         elif action == "issues":
             return model.issues + ([model.warning] if model.warning else []) + dependency_issues(model.mods) + [
                 f"{m.name} [{m.workshop_id or '本地'}]：{m.loader_status}" for m in model.mods if not m.loadable]
@@ -132,7 +281,42 @@ class Api:
             return model.prepare_apply()
         elif action == "apply_commit":
             return model.commit(p["token"])
+        elif action == 'dependency_add':
+            lookup = getattr(self, '_dependency_lookup', None)
+            if jobs.value['running'] or not lookup or lookup['token'] != p.get('token') or lookup['game'] != model.game_id:
+                raise ValueError('前置检查结果已失效，请重新检查。')
+            self._dependency_lookup = None
+            import workshop_collections
+            collections = model.state.setdefault('collections', {})
+            for ident, item in lookup['items'].items():
+                if not any(m.workshop_id == ident for m in model.mods):
+                    collections.setdefault(ident, {'id':ident,'title':item['title'],'single':True,'items':{ident:item}})
+            model.mods = workshop_collections.attach(model.game_id, model.mods, collections, model.state.get('metadata', {}))
+            model.persist_metadata()
+            return [m.key for m in model.mods if m.missing and m.workshop_id in lookup['items']]
+        elif action == 'dependency_page':
+            from urllib.parse import urlencode
+            from core import APP_IDS
+            ident = str(p.get('id', ''))
+            if ident.isascii() and ident.isdecimal():
+                webbrowser.open('https://steamcommunity.com/sharedfiles/filedetails/?id=' + ident)
+            else:
+                query = urlencode({'appid':APP_IDS[model.game_id], 'searchtext':str(p.get('query',''))[:200]})
+                webbrowser.open('https://steamcommunity.com/workshop/browse/?' + query)
+        elif action == "open_local_source":
+            mod = model.targets([p["key"]])[0]
+            if mod.missing or mod.source != "mods_directory":
+                raise ValueError("此项目没有可打开的本地模组文件。")
+            path = mod.path.resolve()
+            if path.is_dir():
+                os.startfile(str(path))
+            elif path.is_file():
+                explorer = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "explorer.exe"
+                subprocess.Popen([str(explorer), "/select,", str(path)])
+            else:
+                raise ValueError("本地文件已移动或删除，请更新模组列表。")
         elif action == "open_workshop":
+            if hasattr(model,"collection_fixture"):raise ValueError("隔离演示使用模拟编号，不打开真实工坊页面。")
             mod = model.targets([p["key"]])[0]
             if not mod.workshop_id or not mod.workshop_id.isdecimal():
                 raise ValueError("这个模组没有关联的创意工坊页面。")
@@ -144,6 +328,7 @@ class Api:
                     "saved": (model.directory / "credentials/steam-api-key.bin").exists(),
                     "session": bool(jobs.api_key)}
         elif action == "account_save":
+            if getattr(model,"demo_mode",False):p=dict(p,remember=False)
             path = model.directory / "credentials/steam-api-key.bin"
             method = p["method"]
             if method not in ("web_schinese", "account_api"):
@@ -171,7 +356,7 @@ class Api:
         elif action == 'covers_start':
             jobs.start_covers(bool(p.get('refresh',False)))
         elif action == "job_stop":
-            if jobs.value["kind"] in ("titles",'covers',"scan"):
+            if jobs.value["kind"] in ("titles",'covers',"scan",'subscribe'):
                 jobs.stop.set()
                 jobs.value["summary"] = "正在停止后续任务，保留此前完成结果；取消等待中的网络请求…"
                 jobs.value["version"] += 1
@@ -205,6 +390,8 @@ class Api:
     def file(self, kind, payload=None):
         """Only native pickers can authorize new export destinations through this API."""
         try:
+            if getattr(self._model,'demo_mode',False) and kind not in ('list_import','export','log'):
+                raise ValueError('空白清单体验不安装、恢复或备份模组，也不修改游戏路径。')
             import webview
             if kind=='list_import':
                 if self._jobs.value['running']:raise ValueError('请先结束后台任务再导入清单。')

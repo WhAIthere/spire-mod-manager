@@ -75,6 +75,58 @@ def wheel_probe(window, anchor):
     return {'requested_start':420, 'settled_start':settled_start, 'steps':results}
 
 
+def inventory_check(window, api, output):
+    report={'ok':False}
+    try:
+        wait_js(window,'Boolean(window.spire?.state?.ready)')
+        if not window.evaluate_js('window.spire.state.api_intro_seen'):
+            window.evaluate_js("document.getElementById('dialogButtons').children[0].click()")
+            wait_js(window,"!document.getElementById('dialog').open")
+        window.resize(1000,610)
+        expected=window.evaluate_js('({total:state.counts.total,local:state.inventory.local,available:state.inventory.available,hidden:state.counts.hidden})')
+        widths=window.evaluate_js("[parseFloat(document.querySelector('.inventory-local').style.width),parseFloat(document.querySelector('.inventory-available').style.width)]")
+        assert abs(widths[0]-expected['local']/expected['total']*100)<.01
+        assert abs(widths[1]-expected['available']/expected['total']*100)<.01
+        window.evaluate_js("document.querySelector('.inventory-meter').click()")
+        wait_js(window,"document.getElementById('dialogTitle').textContent==='清单与本地资源'")
+        assert window.evaluate_js("document.getElementById('dialogBody').textContent.includes('本地文件')")
+        if expected['hidden']:
+            assert window.evaluate_js("document.getElementById('dialogBody').textContent.includes('旧副本')")
+            window.evaluate_js("window.hiddenProbe=state.mods.find(m=>m.superseded&&!m.enabled);document.getElementById('dialogButtons').lastElementChild.click()")
+            wait_js(window,"!state.view.hide_unavailable&&state.visible.includes(window.hiddenProbe.key)")
+            window.evaluate_js("{const row=window.spire.rows.find(r=>r.key===window.hiddenProbe.key);document.getElementById('viewport').scrollTop=row.top;window.spire.renderVirtual()}")
+            assert window.evaluate_js("[...document.querySelectorAll('.mod-row')].some(n=>n.textContent.includes(window.hiddenProbe.nickname)&&n.textContent.includes('已遮蔽'))")
+        else:window.evaluate_js("document.getElementById('dialogButtons').children[0].click()")
+        report.update(ok=True,counts=expected,checks=['layer widths match total/local/available','hidden-copy reason dialog and one-click reveal'])
+        window.evaluate_js("document.querySelector('.mod-row [data-column=version]').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))")
+        wait_js(window,"document.getElementById('dialog').open&&document.getElementById('dialogTitle').textContent.includes('历史版本')")
+        assert window.evaluate_js("document.getElementById('dialogBody').textContent.includes('没有备份')&&Boolean(document.querySelector('.version-local'))")
+        assert window.evaluate_js("!document.getElementById('dialogBody').textContent.includes('回滚到此版本')")
+        capture(window,Path(output).parent/'local-history-preview.png')
+        window.evaluate_js("document.getElementById('dialogButtons').children[0].click();document.querySelector('.mod-row [data-column=name]').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))")
+        wait_js(window,"document.getElementById('dialog').open&&document.getElementById('dialogTitle').textContent==='详细信息'")
+        report['checks'].append('version double-click opens per-mod history with physical copies and record-only state; name double-click opens details')
+        window.evaluate_js("document.getElementById('dialogButtons').children[0].click();{const row=window.spire.rows.find(r=>r.type==='mod'&&state.mods.some(m=>m.key===r.key&&m.enabled));if(row){document.getElementById('viewport').scrollTop=row.top;window.spire.renderVirtual();document.querySelector(`[data-row=\"${row.id}\"] [data-column=version]`).dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));}}")
+        wait_js(window,"document.getElementById('dialog').open&&Boolean(document.querySelector('.version-entry.version-active'))")
+        assert window.evaluate_js("document.querySelector('.version-entry.version-active').textContent.includes('最新记录')&&document.querySelector('.version-entry.version-active').textContent.includes('启用时预计采用')")
+        report['checks'].append('latest record label and green border on selected current record-only version')
+        window.evaluate_js("document.getElementById('dialogButtons').children[0].click();{const r=window.spire.rows.find(r=>r.type==='mod'&&state.mods.some(m=>m.key===r.key&&m.enabled));window.predictedProbe=r.key;window.spire.act('toggle',{keys:[r.key],value:false});}")
+        wait_js(window,"!state.mods.find(m=>m.key===window.predictedProbe).enabled")
+        window.evaluate_js("{const r=window.spire.rows.find(r=>r.key===window.predictedProbe);document.getElementById('viewport').scrollTop=r.top;window.spire.renderVirtual();document.querySelector(`[data-row=\"${r.id}\"] [data-column=version]`).dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));}")
+        wait_js(window,"document.getElementById('dialog').open&&Boolean(document.querySelector('.version-entry.version-active'))")
+        assert window.evaluate_js("document.querySelector('.version-entry.version-active').textContent.includes('启用时预计采用')")
+        window.evaluate_js("{const probe=document.createElement('div');renderTaskLog(probe,{rows:[{id:'completion',status:'success',text:'模组列表更新完成'}],problems:[],changes:{added:[{name:'新增测试',version:'1',workshop_id:'123'}],updated:[],missing:[{name:'消失测试',version:'0'}]}});window.changeProbe=probe.textContent;}")
+        assert window.evaluate_js("window.changeProbe.includes('新增测试')&&window.changeProbe.includes('消失测试')")
+        report['checks'].append('disabled mod retains predicted green border; finished change details render inline')
+
+        capture(window,Path(output).parent/'local-history-selection-preview.png')
+        capture(window,Path(output).parent/'local-inventory-preview.png')
+    except Exception:report['error']=traceback.format_exc()
+    finally:
+        Path(output).write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+        api._allow_close=True;window.destroy()
+
+
 def first_run_check(window, api, output):
     """Blank records, no game paths or credentials, and no real Steam/network calls."""
     report = {'ok': False, 'checks': []}
@@ -115,9 +167,84 @@ def first_run_check(window, api, output):
             window.evaluate_js("document.getElementById('dialogButtons').lastElementChild.click()")
             wait_js(window,"window.spire.state.inventory.missing===1&&!document.getElementById('dialog').open")
         assert window.evaluate_js("document.querySelector('.system-missing')?.textContent==='缺失'&&document.querySelector('.mod-row .switch').disabled")
-        assert window.evaluate_js("document.getElementById('scanStatus').textContent.includes('本地可用 0 / 列表 1')")
+        assert window.evaluate_js("document.querySelector('.inventory-meter').getAttribute('aria-label').includes('列表 1 项 · 本地 0 项 · 可用 0 项')")
         assert window.evaluate_js("document.getElementById('scanStatus').getBoundingClientRect().right<document.getElementById('scan').getBoundingClientRect().left")
-        report['checks'].append('native-picker list import preview, missing row, locked yellow badge, separate local inventory counts')
+        assert window.evaluate_js("document.querySelector('.inventory-local').style.width==='0%'&&document.querySelector('.inventory-available').style.width==='0%'")
+        window.evaluate_js("document.querySelector('.inventory-meter').click()")
+        wait_js(window,"document.getElementById('dialogTitle').textContent==='清单与本地资源'")
+        assert window.evaluate_js("document.getElementById('dialogBody').textContent.includes('缺失 1 项')")
+        window.evaluate_js("document.getElementById('dialogButtons').children[0].click()")
+        report['checks'].append('native-picker list import, missing badge, layered inventory meter and clickable count explanation')
+        api._model.collection_fixture={'id':'900000001','title':'模拟合集','items':{'900000002':{'title':'模拟角色','updated':1},'900000003':{'title':'模拟美化','updated':1}},'warnings':[]}
+        window.evaluate_js("showCollectionImport()")
+        wait_js(window,"document.getElementById('dialogTitle').textContent==='从工坊合集导入'")
+        window.evaluate_js("document.querySelector('#dialogBody input').value='900000001';document.getElementById('dialogButtons').lastElementChild.click()")
+        wait_js(window,"document.getElementById('dialogTitle').textContent==='合集导入预览'")
+        assert window.evaluate_js("document.getElementById('dialogBody').textContent.includes('本地已有 0')")
+        window.evaluate_js("document.getElementById('dialogButtons').lastElementChild.click()")
+        wait_js(window,"state.inventory.missing===3&&!document.getElementById('dialog').open")
+        window.evaluate_js("document.getElementById('viewMode').value='合集分组';document.getElementById('viewMode').dispatchEvent(new Event('change'))")
+        wait_js(window,"state.view.mode==='合集分组'&&document.getElementById('rows').textContent.includes('模拟合集')")
+        window.evaluate_js("document.getElementById('localFilter').value='local';document.getElementById('localFilter').dispatchEvent(new Event('change'))")
+        wait_js(window,"state.view.local_filter==='local'&&state.visible.length===0")
+        window.evaluate_js("document.getElementById('localFilter').value='missing';document.getElementById('localFilter').dispatchEvent(new Event('change'))")
+        wait_js(window,"state.visible.length===3")
+        report['checks'].append('blank-user collection preview/import, source grouping and local/missing filters with simulated API and no subscription')
+        from unittest.mock import patch
+        from core import atomic_json
+        import copy
+        import workshop_collections
+        model=api._model
+        model.change_game('sts2',True)
+        model.game_dir=str(model.directory/'subscription-test-game');Path(model.game_dir).mkdir()
+        model.config_path=str(model.directory/'steam/00000000000000000/settings.save')
+        atomic_json(Path(model.config_path),{'mod_settings':{'mods_enabled':True,'mod_list':[]}})
+        fake_snapshot={'appid':'2868840','account':'00000000000000000','items':{}}
+        calls=[]
+        def fake_steam(game,command='snapshot',**options):
+            if command=='subscribe':calls.append(options['item']);return {'status':'subscribed','item':options['item']}
+            return copy.deepcopy(fake_snapshot)
+        model.steam=fake_steam
+        workshop_collections.merge(model,{'id':'888','title':'订阅测试','items':{'123':{'title':'模拟待订阅模组','updated':0}}})
+        window.evaluate_js("window.spire.act('poll',{revision:-1})")
+        wait_js(window,"state.game==='sts2'&&state.mods.some(m=>m.workshop_id==='123')")
+        window.evaluate_js("document.getElementById('subscriptionMode').click()")
+        wait_js(window,"state.subscription_mode&&Boolean(document.querySelector('.subscribe-pick'))")
+        assert window.evaluate_js("document.getElementById('headerInner').children[0].textContent.includes('订阅')")
+        window.evaluate_js("{const r=window.spire.rows.find(r=>r.type==='mod'&&state.mods.some(m=>m.key===r.key&&m.workshop_id==='123'));document.getElementById('viewport').scrollTop=r.top;window.spire.renderVirtual();document.querySelector(`[data-row=\"${r.id}\"] .subscribe-pick`).click();}")
+        assert window.evaluate_js("subscriptionPicked.size===1&&!state.mods.find(m=>m.workshop_id==='123').enabled"), window.evaluate_js("({picked:[...subscriptionPicked],allowed:state.subscription_keys,visible:state.visible,button:document.querySelector('.subscribe-pick')?.outerHTML,toast:document.getElementById('toast').textContent})")
+        window.evaluate_js("document.getElementById('layoutCovers').click()")
+        wait_js(window,"state.view.layout==='covers'&&Boolean(document.querySelector('.subscribe-pick'))")
+        capture(window,Path(output).parent/'subscription-mode-preview.png')
+        for m in model.mods:
+            if m.workshop_id:fake_snapshot['items'][m.workshop_id]={'disabled':False,'installed':False,'state':1,'path':''}
+        window.evaluate_js("document.getElementById('refreshSubscriptions').click()")
+        wait_js(window,"state.subscription_mode&&state.visible.length===0")
+        fake_snapshot['items'].clear()
+        window.evaluate_js("document.getElementById('refreshSubscriptions').click()")
+        wait_js(window,"state.visible.length===3")
+        window.evaluate_js("document.getElementById('subscriptionMode').click()")
+        wait_js(window,"!state.subscription_mode&&subscriptionPicked.size===0")
+        report['checks'].append('top subscription mode, pick without game toggle, cover layout, hide subscribed-but-not-installed, exit clears picks')
+        with patch('subscriptions.post',return_value={'publishedfiledetails':[{'publishedfileid':'123','result':1,'consumer_app_id':2868840,'file_type':0}]}),patch('subscriptions.running_game_processes',return_value=[]):
+            window.evaluate_js("showSubscribe([state.mods.find(m=>m.workshop_id==='123').key])")
+            wait_js(window,"document.getElementById('dialogTitle').textContent==='订阅缺失模组'")
+            assert window.evaluate_js("document.getElementById('dialogBody').textContent.includes('Steam 已运行并登录')")
+            window.evaluate_js("document.getElementById('dialogButtons').lastElementChild.click()")
+            wait_js(window,"document.getElementById('dialogTitle').textContent==='确认订阅并下载'")
+            assert calls==[]
+            window.evaluate_js("document.getElementById('dialogButtons').children[0].click()")
+            assert calls==[]
+            window.evaluate_js("showSubscribe([state.mods.find(m=>m.workshop_id==='123').key])")
+            wait_js(window,"document.getElementById('dialogTitle').textContent==='订阅缺失模组'")
+            window.evaluate_js("document.getElementById('dialogButtons').lastElementChild.click()")
+            wait_js(window,"document.getElementById('dialogTitle').textContent==='确认订阅并下载'")
+            window.evaluate_js("document.getElementById('dialogButtons').lastElementChild.click()")
+            wait_js(window,"window.spire.job.kind==='subscribe'&&!window.spire.job.running")
+            assert calls==['123']
+        report['checks'].append('subscription warning and exact preview, cancel performs no write, confirm executes only mocked Steam bridge')
+
+
         from web_app import VERSION
         report.update(ok=True, version=VERSION)
         capture(window, Path(output).parent / 'public-first-run-preview.png')
@@ -547,3 +674,27 @@ def check(window, api, output):
         Path(output).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         api._allow_close = True
         window.destroy()
+
+
+def demo_check(window,api,output):
+    """Exercise the online-demo route with transport replaced, then close normally."""
+    from unittest.mock import patch
+    report={'ok':False}
+    def transport(method,ids,key=''):
+        if method=='GetCollectionDetails':return {'collectiondetails':[{'publishedfileid':'100','result':1,'children':[{'publishedfileid':'123','filetype':0}]}]}
+        return {'publishedfiledetails':[{'publishedfileid':i,'result':1,'consumer_app_id':646570,'title':'演示测试'} for i in ids]}
+    try:
+        wait_js(window,'Boolean(window.spire?.state?.demo_mode)')
+        assert window.evaluate_js('state.counts.total===0')
+        with patch('workshop_collections.post',side_effect=transport):
+            window.evaluate_js('showCollectionImport()')
+            wait_js(window,"document.getElementById('dialogTitle').textContent==='从工坊合集导入'")
+            window.evaluate_js("document.querySelector('#dialogBody input').value='100';document.getElementById('dialogButtons').lastElementChild.click()")
+            wait_js(window,"document.getElementById('dialogTitle').textContent==='合集导入预览'")
+            window.evaluate_js("document.getElementById('dialogButtons').lastElementChild.click()")
+            wait_js(window,'state.inventory.missing===1')
+        report={'ok':True,'checks':['empty isolated demo','normal collection fetch path with replaced network transport','import remains list-only','normal close without cache cleanup error']}
+    except Exception:report['error']=traceback.format_exc()
+    finally:
+        Path(output).write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+        api._allow_close=True;window.destroy()

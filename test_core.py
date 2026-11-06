@@ -182,3 +182,22 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class SearchExpressionTests(unittest.TestCase):
+ def test_boolean_branches_and_global_exclusions(self):
+  from core import Mod,filter_mods
+  from pathlib import Path
+  a=Mod('sts1','a','角色美化','1',Path('a.jar'),'mods_directory')
+  b=Mod('sts1','b','皮肤','1',Path('b.jar'),'mods_directory')
+  c=Mod('sts1','c','皮肤测试','1',Path('c.jar'),'mods_directory')
+  d=Mod('sts1','d','角色','1',Path('d.jar'),'mods_directory')
+  self.assertEqual([m.id for m in filter_mods([a,b,c,d],'角色 美化 +皮肤 -测试')],['a','b'])
+  self.assertEqual([m.id for m in filter_mods([a,b,c,d],'-测试')],['a','b','d'])
+  self.assertEqual([m.id for m in filter_mods([a,b,c,d],'角色 + 皮肤 - 测试')],['a','b','d'])
+ def test_fields_quotes_case_and_collection_names(self):
+  from core import Mod,filter_mods
+  from pathlib import Path
+  m=Mod('sts1','a','Some Name','1',Path('SkinFile.jar'),'mods_directory',tags=['美化包'],collections=[{'id':'1','title':'推荐合集'}])
+  self.assertEqual(filter_mods([m],'"some name" file:skin tag:美化包'),[m])
+  self.assertEqual(filter_mods([m],'tag:美化'),[])
+  self.assertEqual(filter_mods([m],'不匹配 +collection:推荐 -file:test'),[m])

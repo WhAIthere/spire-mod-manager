@@ -101,6 +101,7 @@ def fetch_covers(directory, game, ids, key, progress, stop, refresh=False):
     index = read_json(index_path) if index_path.exists() else {}
     ids = sorted({str(i) for i in ids if str(i).isdecimal()})
     pending = [i for i in ids if refresh or not cache.path(game,i).exists() and index.get(i,{}).get('status') != 'unavailable']
+    settled = set(ids) - set(pending)
     total, done = len(ids), len(ids)-len(pending)
     progress(done,total,'缓存',f'已有 {done} 项，无需重复下载')
     query = AccountTitleQuery(APP_IDS[game],pending,key,previews=True,stop_event=stop)
@@ -112,6 +113,8 @@ def fetch_covers(directory, game, ids, key, progress, stop, refresh=False):
         atomic_json(index_path,index)
         done += 1
         failures += status == 'failed'
+        if status != 'failed':
+            settled.add(item)
         progress(done,total,item,{'success':'封面已缓存','unavailable':'此条目没有可用封面','failed':error}[status])
     def download(item,url):
         error = ''
@@ -152,7 +155,9 @@ def fetch_covers(directory, game, ids, key, progress, stop, refresh=False):
                 progress(done,total,item,entry.get('error','请求暂停，可稍后续跑'))
                 break
             if entry['status']=='success':progress(done,total,item,f"封面信息已返回 · 本批 {entry.get('batch_size',1)} 项")
-            if entry['status'] != 'success':
+            if entry.get('api_result') in (9, 15):
+                record(item,'unavailable')
+            elif entry['status'] != 'success':
                 record(item,'failed',entry.get('error','元数据查询失败'))
             elif not entry.get('preview_url'):
                 record(item,'unavailable')
@@ -161,4 +166,4 @@ def fetch_covers(directory, game, ids, key, progress, stop, refresh=False):
         for future in as_completed(futures):
             status,error = future.result()
             if status!='cancelled':record(futures[future],status,error)
-    return {'total':total,'processed':done,'cached':sum(cache.path(game,i).exists() for i in ids),'failed':failures}
+    return {'total':total,'processed':done,'cached':sum(cache.path(game,i).exists() for i in ids),'failed':failures,'settled':sorted(settled)}

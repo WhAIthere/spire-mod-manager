@@ -114,9 +114,13 @@ class Mod:
     compatibility: dict = field(default_factory=dict)
     disk_bytes: int | None = None
     package_bytes: int | None = None
+    scan_stamp: str | None = None
     workshop_disabled: bool | None = None
     missing: bool = False
     wanted_enabled: bool = False
+    collections: list = field(default_factory=list)
+    collection_placeholder: bool = False
+    remote_updated: int = 0
 
     @property
     def nickname(self):
@@ -154,7 +158,8 @@ class Mod:
                 "disk_bytes": self.disk_bytes, "package_bytes": self.package_bytes,
                 "package_root": self.package_key, "package_title": self.package_title,
                 "loader_status": self.loader_status, "loadable": self.loadable,
-                "missing": self.missing, "wanted_enabled": self.wanted_enabled}
+                "missing": self.missing, "wanted_enabled": self.wanted_enabled, "superseded": self.superseded,
+                "collections": self.collections, "remote_updated": self.remote_updated}
 
 
 def read_legacy_json(path):
@@ -275,24 +280,44 @@ def scan(game, game_dir, workshop_roots, titles=None, manifest_cache=None):
         roots.extend((child, "steam_workshop", child.name) for child in sorted(root.iterdir())
                      if child.is_dir() and child.name.isdecimal())
     seen_paths = set()
-    size_cache = {}
-    def directory_size(directory):
-        key = str(directory.resolve())
-        if key not in size_cache:
-            try: size_cache[key] = sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
-            except OSError: size_cache[key] = None
-        return size_cache[key]
+    directory_cache = {}
+    def directory_state(directory):
+        key = os.path.normcase(str(directory))
+        if key in directory_cache:
+            return directory_cache[key]
+        try:
+            total = 0
+            entries_state = []
+            with os.scandir(directory) as entries:
+                for entry in sorted(entries, key=lambda e: e.name):
+                    if entry.is_dir(follow_symlinks=False):
+                        child_size, child_stamp = directory_state(entry.path)
+                        if child_size is None:
+                            raise OSError('无法读取子目录占用')
+                        total += child_size
+                        entries_state.append([entry.name, child_stamp])
+                    elif entry.is_file():
+                        stat = entry.stat()
+                        total += stat.st_size
+                        entries_state.append([entry.name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns])
+            stamp = hashlib.sha256(json.dumps(entries_state, ensure_ascii=False).encode()).hexdigest()
+            result = total, stamp
+        except OSError:
+            result = None, None
+        directory_cache[key] = result
+        return result
     for root, source, workshop_id in roots:
         if not root.is_dir():
             continue
         # MTS reads top-level jars; STS2 packages can have their own subdirectory.
         paths = sorted(root.glob("*.jar")) if game == "sts1" else sorted(root.rglob("*.json"))
         for path in paths:
-            if path.resolve() in seen_paths:
-                continue
-            seen_paths.add(path.resolve())
             try:
-                cache_key=str(path.resolve());stat=path.stat()
+                cache_key = str(path.resolve())
+                if cache_key in seen_paths:
+                    continue
+                seen_paths.add(cache_key)
+                stat = path.stat()
                 stamp=(game,stat.st_mtime_ns,stat.st_ctime_ns,stat.st_size)
                 cached=manifest_cache.get(cache_key)
                 if cached and cached[0]==stamp:
@@ -309,7 +334,7 @@ def scan(game, game_dir, workshop_roots, titles=None, manifest_cache=None):
                                 raise ValueError("清单过大")
                             manifest = json.loads(jar.read(info).decode("utf-8-sig"))
                     else:
-                        if path.stat().st_size > 2_000_000:
+                        if stat.st_size > 2_000_000:
                             continue
                         manifest = read_json(path)
                         if not isinstance(manifest, dict) or not manifest.get("id"):
@@ -322,8 +347,15 @@ def scan(game, game_dir, workshop_roots, titles=None, manifest_cache=None):
                     manifest_cache[cache_key]=(stamp,copy.deepcopy(manifest))
                 mod = metadata(game, manifest, path, source, workshop_id)
                 mod.compatibility = {k: v for k, v in manifest.items() if k.lower() in ("sts_version", "mts_version", "game_version", "min_game_version", "max_game_version", "supported_game_versions", "minimum_game_version", "maximum_game_version")}
-                mod.disk_bytes = path.stat().st_size if game == "sts1" else directory_size(path.parent)
-                mod.package_bytes = directory_size(root)
+                mod.package_bytes, package_stamp = directory_state(root)
+                directory_bytes, directory_stamp = directory_state(path.parent)
+                mod.disk_bytes = stat.st_size if game == "sts1" else directory_bytes
+                if source == "steam_workshop":
+                    mod.scan_stamp = package_stamp
+                elif game == "sts1":
+                    mod.scan_stamp = f"{stat.st_size}:{stat.st_mtime_ns}:{stat.st_ctime_ns}"
+                else:
+                    mod.scan_stamp = directory_stamp
                 mod.package_root = root
                 mod.package_title = titles.get(workshop_id, "工坊标题未缓存") if workshop_id else "本地 mods"
                 mods.append(mod)
@@ -341,6 +373,19 @@ def filter_mods(mods, query="", group=None):
         words = shlex.split(query, posix=True)
     except ValueError:
         words = query.split()
+    groups=[[]];excluded=[];operator=''
+    for token in words:
+        if token in ('+','-'):
+            operator=token;continue
+        sign=operator or (token[0] if token[:1] in ('+','-') else '')
+        word=token if operator else token[1:] if sign else token
+        operator=''
+        if not word:continue
+        if sign=='-':excluded.append(word)
+        else:
+            if sign=='+' and groups[-1]:groups.append([])
+            groups[-1].append(word)
+    groups=[g for g in groups if g]
     result = []
     for mod in mods:
         if group is not None and mod.group != group:
@@ -349,20 +394,15 @@ def filter_mods(mods, query="", group=None):
                   "tag": " ".join(mod.tags), "group": mod.group, "author": mod.authors,
                   "state": "on" if mod.enabled else "off", "source": mod.source,
                   "workshop": mod.workshop_id, "package": mod.package_title,
-                  "file": str(mod.path), "status": mod.loader_status}
+                  "file": str(mod.path), "status": mod.loader_status,"collection":" ".join(c["title"] for c in mod.collections)}
         haystack = " ".join(fields.values()).casefold()
-        matched = True
-        for word in words:
-            key, sep, value = word.partition(":")
+        def matches(word):
+            key,sep,value=word.partition(':')
             if sep and key.casefold() in fields:
-                text = fields[key.casefold()].casefold()
-                # A tag token matches one complete tag, not a substring of another tag.
-                ok = value.casefold() in [t.casefold() for t in mod.tags] if key.casefold() == "tag" else value.casefold() in text
-            else:
-                ok = word.casefold() in haystack
-            if not ok:
-                matched = False
-                break
+                text=fields[key.casefold()].casefold()
+                return value.casefold() in [t.casefold() for t in mod.tags] if key.casefold()=='tag' else value.casefold() in text
+            return word.casefold() in haystack
+        matched=(not groups or any(all(matches(w) for w in g) for g in groups)) and not any(matches(w) for w in excluded)
         if matched:
             result.append(mod)
     return result
@@ -375,16 +415,23 @@ def restore_profile(mods, profile):
         mod.enabled = not mod.missing and (mod.key in enabled or (mod.loadable and mod.legacy_key in enabled))
 
 
+def dependency_version_ok(version, minimum):
+    def version_tuple(value):
+        match = re.fullmatch(r"v?(\d+(?:\.\d+){0,3})", str(value).strip())
+        return tuple(int(x) for x in match[1].split(".")) if match else None
+
+    actual, required = version_tuple(version), version_tuple(minimum)
+    if actual is None or required is None:
+        return None
+    return actual + (0,) * (4 - len(actual)) >= required + (0,) * (4 - len(required))
+
+
 def dependency_issues(mods):
     by_id = {}
     for mod in mods:
         if mod.enabled:
             by_id.setdefault(mod.id, []).append(mod)
     issues = []
-    def version_tuple(value):
-        # Only compare plain numeric versions; prerelease/unknown versions need manual review.
-        match = re.fullmatch(r"v?(\d+(?:\.\d+){0,3})", str(value).strip())
-        return tuple(int(x) for x in match[1].split(".")) if match else None
     for mod in mods:
         if not mod.enabled:
             continue
@@ -395,42 +442,71 @@ def dependency_issues(mods):
             if not candidates:
                 issues.append(f"{mod.name} 需要启用 {dep['id']}")
             elif dep.get("min_version"):
-                actual = version_tuple(candidates[0].version)
-                minimum = version_tuple(dep["min_version"])
-                if actual is None or minimum is None:
+                compatible = dependency_version_ok(candidates[0].version, dep["min_version"])
+                if compatible is None:
                     issues.append(f"请核实版本：{mod.name} 需要 {dep['id']} >= {dep['min_version']}")
-                elif actual + (0,) * (4 - len(actual)) < minimum + (0,) * (4 - len(minimum)):
+                elif not compatible:
                     issues.append(f"版本不足：{mod.name} 需要 {dep['id']} >= {dep['min_version']}")
     return sorted(set(issues))
 
 
-def enable_local_dependencies(mods):
-    """Enable installed, uniquely resolved requirements only. Never perform network operations."""
+def check_local_dependencies(mods):
+    """Walk enabled mods and their prerequisites, adding only clear local matches."""
     by_id = {}
     for mod in mods:
         by_id.setdefault(mod.id, []).append(mod)
-    added = []
-    missing, ambiguous = set(), set()
-    changed = True
-    while changed:
-        changed = False
-        for mod in mods:
-            if not mod.enabled:
-                continue
-            for requirement in mod.dependencies:
-                ident = requirement["id"]
-                candidates = [m for m in by_id.get(ident, []) if m.loadable]
-                if any(m.enabled for m in candidates):
-                    continue
-                if len(candidates) == 1:
-                    candidates[0].enabled = True
-                    added.append(candidates[0])
-                    changed = True
-                elif not by_id.get(ident):
-                    missing.add(ident)
-                else:
-                    ambiguous.add(ident)
-    return added, sorted(missing), sorted(ambiguous)
+    queue = [m for m in mods if m.enabled and not m.missing]
+    initially_enabled = len(queue)
+    added = set()
+    visited = set()
+    rows = []
+    for mod in queue:
+        if mod.key in visited:
+            continue
+        visited.add(mod.key)
+        for requirement in mod.dependencies:
+            ident = str(requirement['id'])
+            known = by_id.get(ident, [])
+            installed = [m for m in known if not m.missing]
+            enabled = [m for m in installed if m.enabled]
+            candidates = [m for m in installed if m.loadable]
+            minimum = requirement.get('min_version')
+            def compatible(candidate):
+                if not minimum:
+                    return True
+                return dependency_version_ok(candidate.version, minimum) is True
+            eligible = [m for m in candidates if compatible(m)]
+            selected = enabled[0] if len(enabled) == 1 else None
+            if selected and selected.loadable and compatible(selected):
+                status = 'enabled_now' if selected.key in added else 'satisfied'
+            elif not enabled and len(eligible) == 1:
+                selected = eligible[0]
+                selected.enabled = True
+                added.add(selected.key)
+                queue.append(selected)
+                status = 'enabled_now'
+            elif installed:
+                status = 'review'
+            else:
+                status = 'missing'
+            reference = selected or (known[0] if len(known) == 1 else None)
+            wid = requirement.get('workshop_id') or requirement.get('publishedfileid') or (
+                reference.workshop_id if reference else '')
+            rows.append({'id':ident, 'name':reference.nickname if reference else str(requirement.get('name') or ''),
+                         'required_by':mod.nickname, 'status':status, 'workshop_id':str(wid or ''),
+                         'min_version':str(minimum or '')})
+    return {'enabled':initially_enabled, 'added':len(added), 'rows':rows}
+
+
+def enable_local_dependencies(mods):
+    """Legacy result shape for callers that only need the changed mods and IDs."""
+    enabled_before = {m.key for m in mods if m.enabled}
+    report = check_local_dependencies(mods)
+    return (
+        [m for m in mods if m.enabled and m.key not in enabled_before],
+        sorted({row['id'] for row in report['rows'] if row['status'] == 'missing'}),
+        sorted({row['id'] for row in report['rows'] if row['status'] == 'review'}),
+    )
 
 
 class ConfigSession:

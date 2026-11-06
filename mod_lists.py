@@ -57,7 +57,19 @@ def normalize(data, game):
         enabled=profile.get('enabled',[])
         if not isinstance(enabled,list) or len(enabled)>10000 or any(not isinstance(x,str) or x not in seen for x in enabled): raise ValueError('开关方案引用无效。')
         clean_profiles[name]={'enabled':enabled,'master':bool(profile.get('master',True))}
-    return {'format':FORMAT,'schema':1,'game':game,'mods':result,'group_orders':orders,'profiles':clean_profiles}
+    collections=data.get('collections',{})
+    if not isinstance(collections,dict) or len(collections)>100:raise ValueError('合集来源数量无效。')
+    clean={}
+    for ident,c in collections.items():
+        if not isinstance(ident,str) or not ident.isdecimal() or not isinstance(c,dict) or not isinstance(c.get('title'),str) or len(c['title'])>2048:raise ValueError('合集来源格式无效。')
+        items=c.get('items',{})
+        if not isinstance(items,dict) or len(items)>10000:raise ValueError('合集成员格式无效。')
+        clean[ident]={'id':ident,'title':c['title'],'items':{}}
+        if c.get('single') is True:clean[ident]['single']=True
+        for wid,item in items.items():
+            if not isinstance(wid,str) or not wid.isdecimal() or not isinstance(item,dict) or not isinstance(item.get('title'),str) or len(item['title'])>2048 or not isinstance(item.get('updated',0),int):raise ValueError('合集成员信息无效。')
+            clean[ident]['items'][wid]={'title':item['title'],'updated':max(0,item.get('updated',0))}
+    return {'format':FORMAT,'schema':1,'game':game,'mods':result,'group_orders':orders,'profiles':clean_profiles,'collections':clean}
 
 
 def record(mod):
@@ -68,10 +80,18 @@ def record(mod):
 
 
 def match(row, mods):
-    candidates=[m for m in mods if not m.missing and (m.source,m.workshop_id,m.id)==(row['source'],row['workshop_id'],row['id'])]
-    exact=[m for m in candidates if record(m)['file']==row['file']]
-    if len(exact)==1:return exact[0]
-    return candidates[0] if len(candidates)==1 else None
+    workshop_id = row['workshop_id'] if row['source'] == 'steam_workshop' else ''
+    candidates = [
+        m for m in mods if not m.missing and m.source == row['source']
+        and (m.workshop_id == workshop_id if workshop_id else m.id == row['id'])
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    matching_id = [m for m in candidates if m.id == row['id']]
+    if len(matching_id) == 1:
+        return matching_id[0]
+    exact = [m for m in (matching_id or candidates) if record(m)['file'] == row['file']]
+    return exact[0] if len(exact) == 1 else None
 
 
 def placeholder(game,row):
@@ -89,11 +109,12 @@ def apply_metadata(mod,row):
 
 
 def export_list(model):
-    rows=[record(m) for m in model.mods]
-    references={m.key:identity(row) for m,row in zip(model.mods,rows)}
+    exported=[m for m in model.mods if not m.collection_placeholder]
+    rows=[record(m) for m in exported]
+    references={m.key:identity(row) for m,row in zip(exported,rows)}
     profiles={name:{'enabled':[references[k] for k in p.get('enabled',[]) if k in references], 'master':p.get('master',True)} for name,p in model.state.get('profiles',{}).items()}
     return normalize({'format':FORMAT,'schema':1,'game':model.game_id,'mods':rows,'profiles':profiles,
-                      'group_orders':model.view.get('group_orders',{})},model.game_id)
+                      'group_orders':model.view.get('group_orders',{}),'collections':model.state.get('collections',{})},model.game_id)
 
 
 def preview(model,data):
@@ -146,6 +167,9 @@ def import_list(model,data,overwrite=False,switches=True):
     for mode,order in data['group_orders'].items():
         orders[mode]=list(dict.fromkeys((order+orders.get(mode,[])) if overwrite else (orders.get(mode,[])+order)))
     model.state['view']=copy.deepcopy(model.view)
+    import workshop_collections
+    for collection in data.get('collections',{}).values():workshop_collections.merge(model,collection)
+    model.mods=workshop_collections.attach(model.game_id,model.mods,model.state.get('collections',{}),model.state.get('metadata',{}))
     model.persist_metadata()
     return preview(model,data)
 
@@ -153,6 +177,8 @@ def import_list(model,data,overwrite=False,switches=True):
 def forget_missing(model,keys):
     targets=model.targets(keys)
     if any(not m.missing for m in targets):raise ValueError('只能从清单中移除缺失项；本地文件不会被删除。')
+    for collection in model.state.get('collections',{}).values():
+        for m in targets:collection['items'].pop(m.workshop_id,None)
     ids={identity(record(m)) for m in targets}
     model.list_records={k:v for k,v in model.list_records.items() if k not in ids}
     model.mods=[m for m in model.mods if m not in targets]

@@ -81,6 +81,43 @@ class SteamClient:
             raise ValueError("Steam 返回了重复的订阅条目。")
         return {"appid": str(self.appid), "account": self.account, "items": items}
 
+    def subscribe(self, ident, expected_account):
+        import time
+        if self.account!=str(expected_account):raise ValueError('Steam 登录账号已变化，未提交订阅。')
+        ident=str(ident)
+        if not ident.isdecimal() or not 0<int(ident)<2**64:raise ValueError('无效工坊编号。')
+        before=self.snapshot()
+        if ident in before['items']:return {'status':'already','item':ident}
+        dll=self.dll
+        subscribe=dll.SteamAPI_ISteamUGC_SubscribeItem
+        subscribe.argtypes=[C.c_void_p,C.c_uint64];subscribe.restype=C.c_uint64
+        utils=dll.SteamAPI_SteamUtils_v010()
+        completed=dll.SteamAPI_ISteamUtils_IsAPICallCompleted
+        completed.argtypes=[C.c_void_p,C.c_uint64,C.POINTER(C.c_bool)];completed.restype=C.c_bool
+        result=dll.SteamAPI_ISteamUtils_GetAPICallResult
+        result.argtypes=[C.c_void_p,C.c_uint64,C.c_void_p,C.c_int,C.c_int,C.POINTER(C.c_bool)];result.restype=C.c_bool
+        dll.SteamAPI_RunCallbacks.argtypes=[];dll.SteamAPI_RunCallbacks.restype=None
+        class SubscribeResult(C.Structure):
+            _pack_=8
+            _fields_=[('result',C.c_int),('item',C.c_uint64)]
+        if C.sizeof(SubscribeResult)!=16:raise ValueError('订阅回调结构不匹配，未提交。')
+        handle=subscribe(self.ugc,int(ident))
+        if not handle:raise ValueError('Steam 未返回有效请求句柄；未自动重试。')
+        deadline=time.monotonic()+25;failed=C.c_bool();answer=None
+        while time.monotonic()<deadline:
+            dll.SteamAPI_RunCallbacks()
+            if completed(utils,handle,C.byref(failed)):
+                answer=SubscribeResult()
+                if failed.value or not result(utils,handle,C.byref(answer),C.sizeof(answer),1313,C.byref(failed)) or failed.value:
+                    raise ValueError('无法确认订阅结果；请求可能已提交，未自动重试，请在 Steam 核对。')
+                break
+            time.sleep(.15)
+        if answer is None:raise ValueError('等待订阅回调超时；可能已提交，未自动重试，请在 Steam 核对。')
+        if answer.item!=int(ident) or answer.result!=1:raise ValueError('Steam 订阅未成功（结果码 '+str(answer.result)+'）；未自动重试。')
+        current=self.snapshot()['items'].get(ident)
+        if current is None:raise ValueError('订阅回调成功，但列表尚未确认；请在 Steam 核对，未自动重试。')
+        return {'status':'subscribed','item':ident,'installed':current['installed'],'state':current['state']}
+
     def set_disabled(self, ids, disabled):
         if not ids:
             return
@@ -149,6 +186,8 @@ def main(request=None):
         command = request.get("command", "snapshot")
         if command == "snapshot":
             return client.snapshot()
+        if command == "subscribe":
+            return client.subscribe(request["item"],request["account"])
         if command == "apply":
             return apply_switches(client, request["expected"], request["changes"])
         raise ValueError("未知 Steam 工坊操作。")
